@@ -1,0 +1,17 @@
+.DS_Store
+
+# Cursor / local tooling
+.cursor/
+
+# Xcode
+DerivedData/
+*.xcuserstate
+*.xccheckout
+*.xcscmblueprint
+xcuserdata/
+*.moved-aside
+*.xcworkspace/xcuserdata/
+
+# SwiftPM (if ever used)
+.build/
+
