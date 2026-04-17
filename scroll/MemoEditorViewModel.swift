@@ -7,36 +7,6 @@ import Foundation
 import Observation
 import SwiftUI
 
-private let debugLogPath = "/Users/koichi/in_progress/scroll/.cursor/debug-da28db.log"
-private let debugSessionId = "da28db"
-private let debugRunId = "pre-fix"
-
-private func appendDebugLog(location: String, message: String, data: [String: Any], hypothesisId: String) {
-	let payload: [String: Any] = [
-		"sessionId": debugSessionId,
-		"runId": debugRunId,
-		"hypothesisId": hypothesisId,
-		"location": location,
-		"message": message,
-		"data": data,
-		"timestamp": Int(Date().timeIntervalSince1970 * 1000)
-	]
-	guard let json = try? JSONSerialization.data(withJSONObject: payload),
-	      var line = String(data: json, encoding: .utf8)
-	else { return }
-	line.append("\n")
-	if let data = line.data(using: .utf8) {
-		if FileManager.default.fileExists(atPath: debugLogPath),
-		   let handle = try? FileHandle(forWritingTo: URL(fileURLWithPath: debugLogPath)) {
-			try? handle.seekToEnd()
-			try? handle.write(contentsOf: data)
-			try? handle.close()
-		} else {
-			try? data.write(to: URL(fileURLWithPath: debugLogPath), options: .atomic)
-		}
-	}
-}
-
 /// 改行分割などで MemoLineTextView へフォーカスを移すためのリクエスト（View が onChange で消費する）。
 struct MemoEditorFocusRequest: Equatable {
 	let lineId: UUID
@@ -108,20 +78,6 @@ final class MemoEditorViewModel {
 		loadedBlockEnd = lastBlock
 		globalLineOffset = lastBlock * linesPerBlock
 		visibleLines = persistence.loadBlock(lastBlock)
-		// #region agent log
-		appendDebugLog(
-			location: "MemoEditorViewModel.swift:bootstrap",
-			message: "loaded last block on bootstrap",
-			data: [
-				"totalPersistedLines": totalPersistedLines,
-				"linesPerBlock": linesPerBlock,
-				"lastBlock": lastBlock,
-				"visibleCount": visibleLines.count,
-				"visibleTrailingEmpty": trailingEmptyLineCount(in: visibleLines)
-			],
-			hypothesisId: "H2"
-		)
-		// #endregion
 		normalizeTrailingEmptyLineOnBootstrap()
 	}
 
@@ -208,19 +164,6 @@ final class MemoEditorViewModel {
 		let beforeTrailing = trailingEmptyLineCount(in: visibleLines)
 		if visibleLines.isEmpty {
 			visibleLines = [MemoLine()]
-			// #region agent log
-			appendDebugLog(
-				location: "MemoEditorViewModel.swift:normalizeTrailingEmptyLineOnBootstrap",
-				message: "bootstrap normalize empty document",
-				data: [
-					"beforeCount": beforeCount,
-					"beforeTrailingEmpty": beforeTrailing,
-					"afterCount": visibleLines.count,
-					"afterTrailingEmpty": trailingEmptyLineCount(in: visibleLines)
-				],
-				hypothesisId: "H2"
-			)
-			// #endregion
 			return
 		}
 		guard isViewingDocumentTail() else { return }
@@ -236,21 +179,6 @@ final class MemoEditorViewModel {
 		if let last = visibleLines.last, !isEffectivelyEmptyLineText(last.text) {
 			visibleLines.append(MemoLine())
 		}
-		// #region agent log
-		appendDebugLog(
-			location: "MemoEditorViewModel.swift:normalizeTrailingEmptyLineOnBootstrap",
-			message: "bootstrap normalize trailing empty lines",
-			data: [
-				"beforeCount": beforeCount,
-				"beforeTrailingEmpty": beforeTrailing,
-				"afterCount": visibleLines.count,
-				"afterTrailingEmpty": trailingEmptyLineCount(in: visibleLines),
-				"totalPersistedLines": totalPersistedLines,
-				"globalLineOffset": globalLineOffset
-			],
-			hypothesisId: "H2"
-		)
-		// #endregion
 	}
 
 	/// 表示が永続化された文書の末尾を含むか（末尾の入力用空行を置く対象か）。
@@ -292,20 +220,6 @@ final class MemoEditorViewModel {
 		MemoRichTextEncoding.assignPersistence(normalized, to: &line)
 		line.modifiedAt = Date()
 		if original != plain {
-			// #region agent log
-			appendDebugLog(
-				location: "MemoEditorViewModel.swift:updateLineRichContent",
-				message: "normalized newline-only edit",
-				data: [
-					"lineId": id.uuidString,
-					"originalLength": original.count,
-					"normalizedLength": plain.count,
-					"visibleCount": visibleLines.count,
-					"trailingEmptyVisible": trailingEmptyLineCount(in: visibleLines)
-				],
-				hypothesisId: "H3"
-			)
-			// #endregion
 		}
 		if wasEmpty, !plain.isEmpty {
 			line.firstWrittenAt = Date()
@@ -331,20 +245,6 @@ final class MemoEditorViewModel {
 		var line = visibleLines[idx]
 		let segments = MemoRichTextEncoding.attributedSplitByNewlines(mutable)
 		guard let first = segments.first else { return }
-		// #region agent log
-		appendDebugLog(
-			location: "MemoEditorViewModel.swift:insertLineBreak",
-			message: "user inserted line break",
-			data: [
-				"lineId": id.uuidString,
-				"rangeLocation": range.location,
-				"rangeLength": range.length,
-				"segmentCount": segments.count,
-				"visibleCountBeforeInsert": visibleLines.count
-			],
-			hypothesisId: "H4"
-		)
-		// #endregion
 
 		line.text = first.string
 		MemoRichTextEncoding.assignPersistence(first, to: &line)
@@ -453,31 +353,8 @@ final class MemoEditorViewModel {
 
 	private func scheduleSave() {
 		saveTask?.cancel()
-		// #region agent log
-		appendDebugLog(
-			location: "MemoEditorViewModel.swift:scheduleSave",
-			message: "scheduled save task",
-			data: [
-				"totalPersistedLines": totalPersistedLines,
-				"globalLineOffset": globalLineOffset,
-				"visibleCount": visibleLines.count,
-				"visibleTrailingEmpty": trailingEmptyLineCount(in: visibleLines)
-			],
-			hypothesisId: "H5"
-		)
-		// #endregion
 		saveTask = Task { [weak self] in
 			try? await Task.sleep(nanoseconds: 400_000_000)
-			// #region agent log
-			appendDebugLog(
-				location: "MemoEditorViewModel.swift:scheduleSave.task",
-				message: "save task woke up",
-				data: [
-					"taskCancelled": Task.isCancelled
-				],
-				hypothesisId: "H5"
-			)
-			// #endregion
 			await self?.flushToDisk()
 		}
 	}
@@ -527,55 +404,16 @@ final class MemoEditorViewModel {
 		while let last = result.last, isEffectivelyEmptyLineText(last.text) {
 			result.removeLast()
 		}
-		// #region agent log
-		appendDebugLog(
-			location: "MemoEditorViewModel.swift:normalizedDocumentForStorage",
-			message: "trimmed trailing empty lines before save",
-			data: [
-				"beforeCount": lines.count,
-				"beforeTrailingEmpty": trailingEmptyLineCount(in: lines),
-				"afterCount": result.count,
-				"afterTrailingEmpty": trailingEmptyLineCount(in: result)
-			],
-			hypothesisId: "H1"
-		)
-		// #endregion
 		return result
 	}
 
 	private func flushToDisk() async {
 		let mergedBeforeTrim = mergeFullDocument()
-		// #region agent log
-		appendDebugLog(
-			location: "MemoEditorViewModel.swift:flushToDisk",
-			message: "flush before trim",
-			data: [
-				"mergedCount": mergedBeforeTrim.count,
-				"mergedTrailingEmpty": trailingEmptyLineCount(in: mergedBeforeTrim),
-				"totalPersistedLines": totalPersistedLines,
-				"globalLineOffset": globalLineOffset,
-				"visibleCount": visibleLines.count,
-				"visibleTrailingEmpty": trailingEmptyLineCount(in: visibleLines)
-			],
-			hypothesisId: "H1"
-		)
-		// #endregion
 		let merged = normalizedDocumentForStorage(mergedBeforeTrim)
 		totalPersistedLines = merged.count
 		persistence.saveAllLines(merged, linesPerBlock: linesPerBlock)
 		let (_, t) = persistence.loadIndex()
 		totalPersistedLines = t
-		// #region agent log
-		appendDebugLog(
-			location: "MemoEditorViewModel.swift:flushToDisk",
-			message: "flush after save",
-			data: [
-				"savedTotalLines": t,
-				"savedTrailingEmpty": trailingEmptyLineCount(in: merged)
-			],
-			hypothesisId: "H1"
-		)
-		// #endregion
 		updateTotalsAndBlocks()
 		await syncCoordinator?.memoDidFlushToDisk(persistence: persistence, linesPerBlock: linesPerBlock, totalLines: totalPersistedLines)
 	}

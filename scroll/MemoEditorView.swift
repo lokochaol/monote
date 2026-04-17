@@ -8,33 +8,6 @@ import SwiftUI
 import UIKit
 #endif
 
-private func appendViewDebugLog(message: String, data: [String: Any], hypothesisId: String) {
-	let payload: [String: Any] = [
-		"sessionId": "da28db",
-		"runId": "pre-fix",
-		"hypothesisId": hypothesisId,
-		"location": "MemoEditorView.swift",
-		"message": message,
-		"data": data,
-		"timestamp": Int(Date().timeIntervalSince1970 * 1000)
-	]
-	guard let json = try? JSONSerialization.data(withJSONObject: payload),
-	      var line = String(data: json, encoding: .utf8)
-	else { return }
-	line.append("\n")
-	let url = URL(fileURLWithPath: "/Users/koichi/in_progress/scroll/.cursor/debug-da28db.log")
-	if let data = line.data(using: .utf8) {
-		if FileManager.default.fileExists(atPath: url.path),
-		   let handle = try? FileHandle(forWritingTo: url) {
-			try? handle.seekToEnd()
-			try? handle.write(contentsOf: data)
-			try? handle.close()
-		} else {
-			try? data.write(to: url, options: .atomic)
-		}
-	}
-}
-
 private func bootstrapScreenHeight() -> CGFloat {
 #if canImport(UIKit)
 	max(UIScreen.main.bounds.height, 320)
@@ -147,18 +120,6 @@ struct MemoEditorView: View {
 				}
 			}
 			.onChange(of: scenePhase) { oldPhase, newPhase in
-				// #region agent log
-				appendViewDebugLog(
-					message: "scenePhase changed",
-					data: [
-						"oldPhase": String(describing: oldPhase),
-						"newPhase": String(describing: newPhase),
-						"didBootstrap": didBootstrap,
-						"isViewingTail": model.isViewingPersistedDocumentTail()
-					],
-					hypothesisId: "H6"
-				)
-				// #endregion
 				// 起動時以外（バックグラウンド復帰など）では、編集中のカーソル位置を尊重して
 				// 自動で末尾へフォーカス/スクロールしない。
 			}
@@ -182,28 +143,8 @@ struct MemoEditorView: View {
 				keyboardTopScreenY = nil
 			}
 			.onReceive(NotificationCenter.default.publisher(for: UIApplication.willResignActiveNotification)) { _ in
-				// #region agent log
-				appendViewDebugLog(
-					message: "application will resign active",
-					data: [
-						"focusedLineId": focusedLineId?.uuidString ?? "",
-						"hasKeyboardTop": keyboardTopScreenY != nil
-					],
-					hypothesisId: "H7"
-				)
-				// #endregion
 			}
 			.onReceive(NotificationCenter.default.publisher(for: UIApplication.didEnterBackgroundNotification)) { _ in
-				// #region agent log
-				appendViewDebugLog(
-					message: "application did enter background",
-					data: [
-						"focusedLineId": focusedLineId?.uuidString ?? "",
-						"hasKeyboardTop": keyboardTopScreenY != nil
-					],
-					hypothesisId: "H6"
-				)
-				// #endregion
 			}
 			.toolbar(.hidden, for: .navigationBar)
 			.sheet(isPresented: $showSearch) {
