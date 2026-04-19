@@ -110,16 +110,19 @@ final class MemoSVGAttachment: NSTextAttachment {
 
 	override func image(forBounds imageBounds: CGRect, textContainer: NSTextContainer?, characterIndex: Int) -> UIImage? {
 		let size = imageBounds.size
+		let scale = displayScale(for: textContainer)
 		if size.width <= 0 || size.height <= 0 {
-			return renderedImage(atDisplaySize: previewLayoutSize)
+			return renderedImage(atDisplaySize: previewLayoutSize, displayScale: scale)
 		}
-		return renderedImage(atDisplaySize: size)
+		return renderedImage(atDisplaySize: size, displayScale: scale)
 	}
 
 	/// 指定した表示サイズ（ポイント）でラスタライズ。ピクセルサイズが前回と一致していればキャッシュを返す。
-	func renderedImage(atDisplaySize size: CGSize) -> UIImage? {
+	/// `displayScale` は描画先の trait collection から取得した値を渡す。`nil`/`0` の場合は現在の
+	/// `UITraitCollection.current.displayScale` を用い、それも取れなければ 2.0 にフォールバックする。
+	func renderedImage(atDisplaySize size: CGSize, displayScale: CGFloat? = nil) -> UIImage? {
 		guard size.width > 0, size.height > 0, !svgData.isEmpty else { return nil }
-		let scale = UIScreen.main.scale
+		let scale = resolvedDisplayScale(displayScale)
 		let pixel = CGSize(width: size.width * scale, height: size.height * scale)
 		if let cached = cachedImage,
 		   abs(cachedPixelSize.width - pixel.width) < 0.5,
@@ -132,6 +135,22 @@ final class MemoSVGAttachment: NSTextAttachment {
 		cachedImage = rendered
 		cachedPixelSize = pixel
 		return rendered
+	}
+
+	/// `textContainer` から辿れる描画先の `displayScale` を返す。取得できない場合は `nil`。
+	/// `NSTextContainer` には view への公開参照が無いため、現状は contextual な
+	/// `UITraitCollection.current` に委ねる。
+	private func displayScale(for textContainer: NSTextContainer?) -> CGFloat? {
+		_ = textContainer
+		let s = UITraitCollection.current.displayScale
+		return s > 0 ? s : nil
+	}
+
+	private func resolvedDisplayScale(_ provided: CGFloat?) -> CGFloat {
+		if let s = provided, s > 0 { return s }
+		let current = UITraitCollection.current.displayScale
+		if current > 0 { return current }
+		return 2.0
 	}
 }
 
