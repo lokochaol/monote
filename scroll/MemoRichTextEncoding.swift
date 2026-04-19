@@ -38,7 +38,7 @@ enum MemoRichTextEncoding {
 		return NSAttributedString(string: plainFallback, attributes: defaultTypingAttributes())
 	}
 
-	static func rtfData(from attributed: NSAttributedString) -> Data? {
+	nonisolated static func rtfData(from attributed: NSAttributedString) -> Data? {
 		guard attributed.length > 0 else { return nil }
 		let range = NSRange(location: 0, length: attributed.length)
 		return try? attributed.data(
@@ -47,12 +47,12 @@ enum MemoRichTextEncoding {
 		)
 	}
 
-	static func archivedAttributedData(from attributed: NSAttributedString) -> Data? {
+	nonisolated static func archivedAttributedData(from attributed: NSAttributedString) -> Data? {
 		guard attributed.length > 0 else { return nil }
 		return try? NSKeyedArchiver.archivedData(withRootObject: attributed, requiringSecureCoding: true)
 	}
 
-	static func containsTextAttachment(_ attributed: NSAttributedString) -> Bool {
+	nonisolated static func containsTextAttachment(_ attributed: NSAttributedString) -> Bool {
 		var found = false
 		attributed.enumerateAttribute(.attachment, in: NSRange(location: 0, length: attributed.length), options: []) { value, _, stop in
 			if value is NSTextAttachment {
@@ -64,7 +64,7 @@ enum MemoRichTextEncoding {
 	}
 
 	/// RTF と必要に応じてアーカイブを生成。添付画像がある行はアーカイブも保存する。
-	static func persistPayload(from attributed: NSAttributedString) -> (rtf: Data?, archive: Data?) {
+	nonisolated static func persistPayload(from attributed: NSAttributedString) -> (rtf: Data?, archive: Data?) {
 		guard attributed.length > 0 else { return (nil, nil) }
 		let rtf = rtfData(from: attributed)
 		let hasAttachment = containsTextAttachment(attributed)

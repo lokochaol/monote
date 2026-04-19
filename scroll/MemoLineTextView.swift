@@ -4,6 +4,7 @@
 //
 
 import PhotosUI
+import SVGKit
 import SwiftUI
 import UIKit
 
@@ -132,8 +133,13 @@ enum MemoImageInsertion {
 	}
 
 	static func presentFullscreen(for attachment: NSTextAttachment, from view: UIView) {
-		guard let img = fullImage(from: attachment) else { return }
 		guard let host = view.memoContainingViewController() else { return }
+		if let svg = attachment as? MemoSVGAttachment {
+			let sheet = MemoFullscreenSVGViewController(svgData: svg.svgData)
+			host.present(sheet, animated: true)
+			return
+		}
+		guard let img = fullImage(from: attachment) else { return }
 		let sheet = MemoFullscreenImageViewController(image: img)
 		host.present(sheet, animated: true)
 	}
@@ -178,7 +184,7 @@ private final class MemoFullscreenImageViewController: UIViewController {
 
 		let close = UIButton(type: .close)
 		close.translatesAutoresizingMaskIntoConstraints = false
-		close.accessibilityLabel = "閉じる"
+		close.accessibilityLabel = "Close"
 		close.addTarget(self, action: #selector(closeTapped), for: .touchUpInside)
 		view.addSubview(close)
 
@@ -201,19 +207,120 @@ private final class MemoFullscreenImageViewController: UIViewController {
 	}
 }
 
+/// SVG をフルスクリーンでベクタ表示（ピンチでズームしても再描画でクリア）。
+private final class MemoFullscreenSVGViewController: UIViewController, UIScrollViewDelegate {
+	private let svgData: Data
+	private let scrollView = UIScrollView()
+	private let imageView = UIImageView()
+	/// 初期描画時に確保する、画面サイズに対する解像度倍率。ピンチで拡大してもこの倍率まではクリア。
+	private let resolutionHeadroom: CGFloat = 3
+	private var didInitialRender = false
+
+	init(svgData: Data) {
+		self.svgData = svgData
+		super.init(nibName: nil, bundle: nil)
+		modalPresentationStyle = .fullScreen
+		modalTransitionStyle = .crossDissolve
+	}
+
+	@available(*, unavailable)
+	required init?(coder: NSCoder) { nil }
+
+	override func viewDidLoad() {
+		super.viewDidLoad()
+		view.backgroundColor = .black
+
+		scrollView.translatesAutoresizingMaskIntoConstraints = false
+		scrollView.delegate = self
+		scrollView.minimumZoomScale = 1
+		scrollView.maximumZoomScale = 4
+		scrollView.bouncesZoom = true
+		scrollView.showsVerticalScrollIndicator = false
+		scrollView.showsHorizontalScrollIndicator = false
+		view.addSubview(scrollView)
+
+		imageView.contentMode = .scaleAspectFit
+		imageView.isUserInteractionEnabled = true
+		imageView.translatesAutoresizingMaskIntoConstraints = false
+		scrollView.addSubview(imageView)
+
+		let close = UIButton(type: .close)
+		close.translatesAutoresizingMaskIntoConstraints = false
+		close.accessibilityLabel = "Close"
+		close.addTarget(self, action: #selector(closeTapped), for: .touchUpInside)
+		view.addSubview(close)
+
+		NSLayoutConstraint.activate([
+			scrollView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+			scrollView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+			scrollView.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
+			scrollView.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor),
+			imageView.leadingAnchor.constraint(equalTo: scrollView.contentLayoutGuide.leadingAnchor),
+			imageView.trailingAnchor.constraint(equalTo: scrollView.contentLayoutGuide.trailingAnchor),
+			imageView.topAnchor.constraint(equalTo: scrollView.contentLayoutGuide.topAnchor),
+			imageView.bottomAnchor.constraint(equalTo: scrollView.contentLayoutGuide.bottomAnchor),
+			imageView.widthAnchor.constraint(equalTo: scrollView.frameLayoutGuide.widthAnchor),
+			imageView.heightAnchor.constraint(equalTo: scrollView.frameLayoutGuide.heightAnchor),
+			close.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 8),
+			close.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -8)
+		])
+
+		let tap = UITapGestureRecognizer(target: self, action: #selector(closeTapped))
+		imageView.addGestureRecognizer(tap)
+	}
+
+	override func viewDidLayoutSubviews() {
+		super.viewDidLayoutSubviews()
+		guard !didInitialRender, scrollView.bounds.width > 0, scrollView.bounds.height > 0 else { return }
+		renderImage(fittingSize: scrollView.bounds.size)
+		didInitialRender = true
+	}
+
+	/// SVG を `size × resolutionHeadroom` のピクセルで描画して `UIImage` 化する。
+	/// アスペクト比は `scaleAspectFit` で合わせるので、画像自体は SVG の自然比を保ったまま返す。
+	private func renderImage(fittingSize size: CGSize) {
+		guard let svg = SVGKImage(data: svgData) else { return }
+		let intrinsic: CGSize = {
+			let s = svg.size
+			if s.width > 0, s.height > 0 { return s }
+			return size
+		}()
+		let fitScale = min(size.width / max(intrinsic.width, 1), size.height / max(intrinsic.height, 1))
+		let target = CGSize(
+			width: max(1, intrinsic.width * fitScale * resolutionHeadroom),
+			height: max(1, intrinsic.height * fitScale * resolutionHeadroom)
+		)
+		svg.size = target
+		imageView.image = svg.uiImage
+	}
+
+	func viewForZooming(in scrollView: UIScrollView) -> UIView? { imageView }
+
+	@objc private func closeTapped() {
+		dismiss(animated: true)
+	}
+}
+
 /// `SwiftUI` から渡される幅でテキストコンテナを揃え、行が横にはみ出さないようにする。
 private final class MemoWrappingTextView: UITextView, UIGestureRecognizerDelegate {
 	private let imageTap = UITapGestureRecognizer()
+	private let voidTap = UITapGestureRecognizer()
 
 	override init(frame: CGRect, textContainer: NSTextContainer?) {
 		super.init(frame: frame, textContainer: textContainer)
 		setupImageTap()
+		setupVoidTap()
 	}
 
 	required init?(coder: NSCoder) {
 		super.init(coder: coder)
 		setupImageTap()
+		setupVoidTap()
 	}
+
+	/// 行マージ・行間移動で別 `UITextView` へ first responder が渡っても、直前に使っていた
+	/// 入力モード（英字 / 日本語 / 顔文字等）が復元されるよう、全行で同じ識別子を返す。
+	override var textInputContextIdentifier: String? { "scroll.memo.line" }
 
 	private func setupImageTap() {
 		imageTap.addTarget(self, action: #selector(handleImageTap(_:)))
@@ -225,18 +332,42 @@ private final class MemoWrappingTextView: UITextView, UIGestureRecognizerDelegat
 		addGestureRecognizer(imageTap)
 	}
 
+	private func setupVoidTap() {
+		voidTap.addTarget(self, action: #selector(handleVoidTap(_:)))
+		voidTap.numberOfTapsRequired = 1
+		voidTap.cancelsTouchesInView = false
+		voidTap.delaysTouchesBegan = false
+		voidTap.delaysTouchesEnded = false
+		voidTap.delegate = self
+		addGestureRecognizer(voidTap)
+	}
+
 	func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
-		guard gestureRecognizer === imageTap else { return true }
-		let pt = touch.location(in: self)
-		return attachment(at: pt) != nil
+		if gestureRecognizer === imageTap {
+			let pt = touch.location(in: self)
+			return attachmentAndIndex(at: pt) != nil
+		}
+		return true
 	}
 
 	func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool {
 		// テキスト編集（キャレット移動 / 選択）を邪魔しない
-		gestureRecognizer === imageTap
+		gestureRecognizer === imageTap || gestureRecognizer === voidTap
 	}
 
-	private func attachment(at viewPoint: CGPoint) -> NSTextAttachment? {
+	/// 非編集中（= `!isFirstResponder`）は iOS 標準の長押し系（虫眼鏡・精密キャレット）を始動させない。
+	/// タップによるフォーカス取得や、自前の `imageTap` / `voidTap` は通過させる。
+	override func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+		if gestureRecognizer === imageTap || gestureRecognizer === voidTap {
+			return super.gestureRecognizerShouldBegin(gestureRecognizer)
+		}
+		if !isFirstResponder, gestureRecognizer is UILongPressGestureRecognizer {
+			return false
+		}
+		return super.gestureRecognizerShouldBegin(gestureRecognizer)
+	}
+
+	private func attachmentAndIndex(at viewPoint: CGPoint) -> (NSTextAttachment, Int)? {
 		let layoutManager = self.layoutManager
 		let textContainer = self.textContainer
 		var point = viewPoint
@@ -253,23 +384,131 @@ private final class MemoWrappingTextView: UITextView, UIGestureRecognizerDelegat
 		let glyphRange = layoutManager.glyphRange(forCharacterRange: charRange, actualCharacterRange: nil)
 		guard glyphRange.length > 0 else { return nil }
 		let rect = layoutManager.boundingRect(forGlyphRange: glyphRange, in: textContainer)
-		return rect.contains(point) ? att : nil
+		return rect.contains(point) ? (att, idx) : nil
 	}
 
 	@objc private func handleImageTap(_ gesture: UITapGestureRecognizer) {
 		guard gesture.state == .ended else { return }
 		let pt = gesture.location(in: self)
-		guard let att = attachment(at: pt) else { return }
+		guard let (att, idx) = attachmentAndIndex(at: pt) else { return }
+		if let chip = att as? MemoLinkChipAttachment {
+			let linkVal = textStorage.attribute(.link, at: idx, effectiveRange: nil)
+			guard let url = MemoLinkChipInsertion.openableHTTPURL(from: chip, linkAttribute: linkVal) else { return }
+			MemoLinkChipInsertion.openInBrowser(url)
+			return
+		}
 		MemoImageInsertion.presentFullscreen(for: att, from: self)
 	}
 
+	@objc private func handleVoidTap(_ gesture: UITapGestureRecognizer) {
+		guard gesture.state == .ended else { return }
+		let pt = gesture.location(in: self)
+		guard attachmentAndIndex(at: pt) == nil else { return }
+		// `UITextView` の既定タップ後に選択を上書きする
+		DispatchQueue.main.async { [weak self] in
+			self?.snapCaretForTapInTrailingOrBelowTextVoid(viewPoint: pt)
+		}
+	}
+
+	/// 行末より右の余白、または本文レイアウトより下の余白をタップしたとき、その行の末尾（または文末）へキャレットを寄せる。
+	private func snapCaretForTapInTrailingOrBelowTextVoid(viewPoint: CGPoint) {
+		let lm = layoutManager
+		let tc = textContainer
+		let inset = textContainerInset
+		let pad = textContainer.lineFragmentPadding
+
+		var p = viewPoint
+		p.x -= inset.left + pad
+		p.y -= inset.top
+
+		let containerW = max(1, tc.size.width)
+		let containerH = max(1, tc.size.height)
+		guard p.x >= -2, p.x <= containerW + 2, p.y >= -2, p.y <= containerH + 2 else { return }
+
+		let plainLen = (text as NSString?)?.length ?? 0
+		let usedBounds = lm.usedRect(for: tc)
+
+		// 本文より下の余白 → 文末（空行なら先頭）
+		if p.y > usedBounds.maxY + 0.5 {
+			if !isFirstResponder { _ = becomeFirstResponder() }
+			selectedRange = NSRange(location: plainLen, length: 0)
+			return
+		}
+
+		guard plainLen > 0 else { return }
+
+		var frac: CGFloat = 0
+		let gi = lm.glyphIndex(for: p, in: tc, fractionOfDistanceThroughGlyph: &frac)
+		var fragGlyphRange = NSRange(location: 0, length: 0)
+		let usedInFrag = lm.lineFragmentUsedRect(forGlyphAt: gi, effectiveRange: &fragGlyphRange)
+		let fullFrag = lm.lineFragmentRect(forGlyphAt: gi, effectiveRange: &fragGlyphRange)
+
+		let ySlop: CGFloat = 2
+		guard p.y >= fullFrag.minY - ySlop, p.y <= fullFrag.maxY + ySlop else { return }
+
+		let xEps: CGFloat = 3
+		let tailStartsAt = usedInFrag.maxX - xEps
+		let inHorizontalTail = p.x > tailStartsAt && p.x <= fullFrag.maxX + xEps
+		let emptyLineBand = usedInFrag.width < 1 && p.x >= fullFrag.minX - xEps && p.x <= fullFrag.maxX + xEps
+		guard inHorizontalTail || emptyLineBand else { return }
+
+		let charRange = lm.characterRange(forGlyphRange: fragGlyphRange, actualGlyphRange: nil)
+		let end = NSMaxRange(charRange)
+		guard end >= 0, end <= plainLen else { return }
+
+		if !isFirstResponder { _ = becomeFirstResponder() }
+		selectedRange = NSRange(location: end, length: 0)
+	}
+
+	/// `typingAttributes` で挿入（タブ・箇条書きプレフィックス・キーボードアクセサリと共有）。
+	/// `uniformBold` を渡したときだけ、その有無に合わせてフォントの太字を上書きする（日時挿入用）。
+	fileprivate func insertWithTypingAttributes(_ string: String, uniformBold: Bool? = nil) {
+		guard markedTextRange == nil else { return }
+		let sel = selectedRange
+		var attrs = typingAttributes
+		if let uniformBold {
+			let baseFont = (attrs[.font] as? UIFont) ?? UIFont.preferredFont(forTextStyle: .body)
+			attrs[.font] = baseFont.memoFontWithUniformBold(uniformBold)
+		}
+		let insertion = NSAttributedString(string: string, attributes: attrs)
+		textStorage.replaceCharacters(in: sel, with: insertion)
+		selectedRange = NSRange(location: sel.location + (string as NSString).length, length: 0)
+		invalidateIntrinsicContentSize()
+		delegate?.textViewDidChange?(self)
+	}
+
+	override var keyCommands: [UIKeyCommand]? {
+		let tab = UIKeyCommand(input: "\t", modifierFlags: [], action: #selector(keyCommandInsertTab(_:)))
+		tab.wantsPriorityOverSystemBehavior = true
+		return [tab]
+	}
+
+	@objc private func keyCommandInsertTab(_ sender: UIKeyCommand) {
+		insertWithTypingAttributes("\t")
+	}
+
 	override func paste(_ sender: Any?) {
+		if let svgData = Self.pasteboardSVGData(), MemoSVGInsertion.insertSVG(data: svgData, into: self) {
+			return
+		}
 		if let img = UIPasteboard.general.image {
 			MemoImageInsertion.insertImage(img, into: self)
 			return
 		}
 		guard let s = UIPasteboard.general.string, !s.isEmpty else {
 			super.paste(sender)
+			return
+		}
+
+		if let sniffed = MemoSVGInsertion.sniffedSVGData(fromString: s),
+		   MemoSVGInsertion.insertSVG(data: sniffed, into: self) {
+			return
+		}
+
+		if let url = MemoLinkChipInsertion.lonePastedWebURL(s) {
+			let attrs = MemoRichTextEncoding.defaultTypingAttributes()
+			typingAttributes = attrs
+			MemoLinkChipInsertion.insertLinkChip(for: url, into: self)
 			return
 		}
 
@@ -295,24 +534,37 @@ private final class MemoWrappingTextView: UITextView, UIGestureRecognizerDelegat
 			invalidateIntrinsicContentSize()
 		}
 	}
+
+	/// ペーストボード内を走査して SVG データを取り出す。UTI `public.svg-image` 等の生 `Data` が最優先。
+	fileprivate static func pasteboardSVGData() -> Data? {
+		let svgTypes = ["public.svg-image", "org.w3.scalable-vector-graphics-xml"]
+		let pb = UIPasteboard.general
+		for type in svgTypes {
+			if let d = pb.data(forPasteboardType: type), !d.isEmpty {
+				return d
+			}
+		}
+		return nil
+	}
 }
 
 /// 純正メモのように選択範囲へ太字・文字色を付けられる 1 行エディタ（`UITextView` + RTF 永続化）
 struct MemoLineTextView: UIViewRepresentable {
-	let rtfData: Data?
-	let archiveData: Data?
-	let plainText: String
+	/// 表示用本文（すでに復元済み）。フォーカス移動時の復元コストを避けるため外から渡す。
+	let attributed: NSAttributedString
 	var isFocused: Bool
 	var highlightQuery: String?
 	/// 検索ハイライトの濃さ（0...1）。nil の場合は既定値。
 	var highlightAlpha: CGFloat?
+	/// `false` にすると `UITextView` の操作（タップ／編集／長押し）を完全に止める。選択モード中に使う。
+	var isInteractive: Bool = true
 	@Binding var pendingCaretUTF16: Int?
 
-	var onAttributedEdit: (NSAttributedString) -> Void
+	var onAttributedEdit: (NSAttributedString, Int) -> Void
 	var onInsertLineBreak: (NSAttributedString, NSRange) -> Void
 	var onBackspaceAtBeginning: () -> Void
 	var onEditingBegan: () -> Void = {}
-	var onSelectionInteraction: (_ selectionLength: Int) -> Void = { _ in }
+	var onSelectionInteraction: (_ selectionLength: Int, _ caretUTF16: Int) -> Void = { _, _ in }
 
 	func makeCoordinator() -> Coordinator {
 		Coordinator(self)
@@ -325,7 +577,7 @@ struct MemoLineTextView: UIViewRepresentable {
 		tv.allowsEditingTextAttributes = true
 		let attrs = MemoRichTextEncoding.defaultTypingAttributes()
 		tv.typingAttributes = attrs
-		tv.attributedText = MemoRichTextEncoding.attributedString(rtfData: rtfData, archiveData: archiveData, plainFallback: plainText)
+		tv.attributedText = attributed
 		tv.textContainer.lineFragmentPadding = 0
 		tv.textContainer.widthTracksTextView = false
 		tv.isScrollEnabled = false
@@ -342,6 +594,7 @@ struct MemoLineTextView: UIViewRepresentable {
 		tv.inputAccessoryView = accessory
 
 		context.coordinator.accessory = accessory
+
 		return tv
 	}
 
@@ -359,7 +612,16 @@ struct MemoLineTextView: UIViewRepresentable {
 		context.coordinator.accessory?.attach(to: uiView)
 		context.coordinator.accessory?.setAccentColors(MemoJournalPalette.formatBarUIColors())
 
-		let base = MemoRichTextEncoding.attributedString(rtfData: rtfData, archiveData: archiveData, plainFallback: plainText)
+		// 選択モード中などで完全に操作を止める。first responder を握ったままだと
+		// 誤って編集が再開するため、必要なら resign も行う。
+		if uiView.isUserInteractionEnabled != isInteractive {
+			uiView.isUserInteractionEnabled = isInteractive
+			if !isInteractive, uiView.isFirstResponder {
+				uiView.resignFirstResponder()
+			}
+		}
+
+		let base = attributed
 		let target: NSAttributedString = {
 			if !isFocused, let q = highlightQuery, !q.isEmpty {
 				return Self.makeHighlighted(attr: base, query: q, alpha: highlightAlpha)
@@ -367,7 +629,12 @@ struct MemoLineTextView: UIViewRepresentable {
 			return base
 		}()
 
-		let skipBodyReplace = uiView.isFirstResponder && isFocused && target.string == (uiView.text ?? "")
+		// IME 変換中（marked text）がある状態で本文を差し替えると、変換が毎入力で確定してしまう。
+		let isComposing = uiView.markedTextRange != nil
+		// `isFocused`（SwiftUI の focusedLineId）だけでは第一応答者と 1 フレームずれることがある（LazyVStack・
+		// 行レイアウト変化など）。その間に本文を差し替えると `typingAttributes` が落ち、直後の太字などが無効になる。
+		let plainMatchesModel = target.string == (uiView.text ?? "")
+		let skipBodyReplace = isComposing || (uiView.isFirstResponder && plainMatchesModel)
 		if !skipBodyReplace {
 			if !target.isEqual(to: uiView.attributedText) {
 				uiView.attributedText = target
@@ -435,8 +702,9 @@ struct MemoLineTextView: UIViewRepresentable {
 		}
 
 		func textViewDidChange(_ textView: UITextView) {
+			let caret = textView.selectedRange.location
+			parent.onAttributedEdit(textView.attributedText, caret)
 			textView.invalidateIntrinsicContentSize()
-			parent.onAttributedEdit(textView.attributedText)
 		}
 
 		func textViewDidBeginEditing(_ textView: UITextView) {
@@ -449,7 +717,7 @@ struct MemoLineTextView: UIViewRepresentable {
 
 		func textViewDidChangeSelection(_ textView: UITextView) {
 			guard textView.isFirstResponder, parent.isFocused else { return }
-			parent.onSelectionInteraction(textView.selectedRange.length)
+			parent.onSelectionInteraction(textView.selectedRange.length, textView.selectedRange.location)
 		}
 
 		func textView(_ textView: UITextView, shouldChangeTextIn range: NSRange, replacementText text: String) -> Bool {
@@ -464,20 +732,50 @@ struct MemoLineTextView: UIViewRepresentable {
 			return true
 		}
 
-		func textView(
-			_ textView: UITextView,
-			shouldInteractWith textAttachment: NSTextAttachment,
-			in characterRange: NSRange,
-			interaction: UITextItemInteraction
-		) -> Bool {
-			guard interaction == .invokeDefaultAction else { return true }
-			MemoImageInsertion.presentFullscreen(for: textAttachment, from: textView)
-			return false
+		func textView(_ textView: UITextView, primaryActionFor textItem: UITextItem, defaultAction: UIAction) -> UIAction? {
+			guard case .textAttachment(let attachment) = textItem.content else {
+				return defaultAction
+			}
+			if let chip = attachment as? MemoLinkChipAttachment {
+				return UIAction { [weak textView] _ in
+					guard let tv = textView else { return }
+					var chipIndex: Int?
+					tv.textStorage.enumerateAttribute(.attachment, in: NSRange(location: 0, length: tv.textStorage.length), options: []) { value, range, stop in
+						guard (value as AnyObject) === (chip as AnyObject) else { return }
+						chipIndex = range.location
+						stop.pointee = true
+					}
+					let linkVal = chipIndex.map { tv.textStorage.attribute(.link, at: $0, effectiveRange: nil) }
+					guard let url = MemoLinkChipInsertion.openableHTTPURL(from: chip, linkAttribute: linkVal ?? nil) else { return }
+					MemoLinkChipInsertion.openInBrowser(url)
+				}
+			}
+			return UIAction { _ in
+				MemoImageInsertion.presentFullscreen(for: attachment, from: textView)
+			}
 		}
 	}
 }
 
 // MARK: - キーボード上ツールバー（2段階: 選択 → スタイル or 写真）
+
+private extension UIFont {
+	/// 既存のサイズ・イタリック等は維持し、太字の有無だけを揃える。
+	func memoFontWithUniformBold(_ bold: Bool) -> UIFont {
+		var traits = fontDescriptor.symbolicTraits
+		if bold {
+			traits.insert(.traitBold)
+		} else {
+			traits.remove(.traitBold)
+		}
+		guard let desc = fontDescriptor.withSymbolicTraits(traits) else { return self }
+		return UIFont(descriptor: desc, size: pointSize)
+	}
+
+	func memoFontWithBoldToggled() -> UIFont {
+		memoFontWithUniformBold(!fontDescriptor.symbolicTraits.contains(.traitBold))
+	}
+}
 
 final class MemoRichTextKeyboardAccessoryView: UIView, PHPickerViewControllerDelegate, UIImagePickerControllerDelegate, UINavigationControllerDelegate {
 	private enum Step {
@@ -499,6 +797,9 @@ final class MemoRichTextKeyboardAccessoryView: UIView, PHPickerViewControllerDel
 	private let toolbarHorizontalInset: CGFloat = 20
 	private let touchTargetSize: CGFloat = 44
 	private let chipVisualSize: CGFloat = 28
+	private weak var timestampChoiceButton: UIButton?
+	/// 長押しで形式ピッカーを出した直後の `touchUpInside` を無視する（送られない端末では `ended` で解除）。
+	private var skipNextTimestampTouchUp = false
 
 	override init(frame: CGRect) {
 		super.init(frame: frame)
@@ -511,10 +812,10 @@ final class MemoRichTextKeyboardAccessoryView: UIView, PHPickerViewControllerDel
 		rootChoiceStack.axis = .horizontal
 		rootChoiceStack.alignment = .center
 		rootChoiceStack.spacing = 12
-		rootChoiceStack.distribution = .fillEqually
+		rootChoiceStack.distribution = .fill
 		rootChoiceStack.translatesAutoresizingMaskIntoConstraints = false
 
-		let styleChoice = makeRootChipButton(accessibilityLabel: "文字スタイル") { b in
+		let styleChoice = makeRootChipButton(accessibilityLabel: "Text style") { b in
 			b.setTitle("Aa", for: .normal)
 			b.setTitleColor(.label, for: .normal)
 			let base = UIFont.systemFont(ofSize: 20, weight: .semibold)
@@ -522,16 +823,55 @@ final class MemoRichTextKeyboardAccessoryView: UIView, PHPickerViewControllerDel
 			b.titleLabel?.adjustsFontForContentSizeCategory = true
 		}
 		styleChoice.addTarget(self, action: #selector(goToStyleScreen), for: .touchUpInside)
+		styleChoice.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
-		let photoChoice = makeRootChipButton(accessibilityLabel: "写真の挿入") { b in
+		let bulletChoice = makeRootChipButton(accessibilityLabel: "Bullet list") { b in
+			let symFont = UIFontMetrics(forTextStyle: .title3).scaledFont(for: UIFont.systemFont(ofSize: 20, weight: .medium))
+			let cfg = UIImage.SymbolConfiguration(font: symFont, scale: .default)
+			b.setImage(UIImage(systemName: "list.bullet", withConfiguration: cfg), for: .normal)
+			b.tintColor = .label
+		}
+		bulletChoice.addTarget(self, action: #selector(bulletListTapped), for: .touchUpInside)
+		bulletChoice.widthAnchor.constraint(equalToConstant: touchTargetSize).isActive = true
+		bulletChoice.setContentCompressionResistancePriority(.required, for: .horizontal)
+
+		let tabChoice = makeRootChipButton(accessibilityLabel: "Tab") { b in
+			let symFont = UIFontMetrics(forTextStyle: .title3).scaledFont(for: UIFont.systemFont(ofSize: 20, weight: .medium))
+			let cfg = UIImage.SymbolConfiguration(font: symFont, scale: .default)
+			b.setImage(UIImage(systemName: "arrow.right.to.line.compact", withConfiguration: cfg), for: .normal)
+			b.tintColor = .label
+		}
+		tabChoice.addTarget(self, action: #selector(tabInsertTapped), for: .touchUpInside)
+		tabChoice.widthAnchor.constraint(equalToConstant: touchTargetSize).isActive = true
+		tabChoice.setContentCompressionResistancePriority(.required, for: .horizontal)
+
+		let timestampChoice = makeRootChipButton(accessibilityLabel: "Date & time") { b in
+			let symFont = UIFontMetrics(forTextStyle: .title3).scaledFont(for: UIFont.systemFont(ofSize: 20, weight: .medium))
+			let cfg = UIImage.SymbolConfiguration(font: symFont, scale: .default)
+			b.setImage(UIImage(systemName: "calendar.badge.clock", withConfiguration: cfg), for: .normal)
+			b.tintColor = .label
+		}
+		timestampChoice.addTarget(self, action: #selector(timestampInsertTapped), for: .touchUpInside)
+		timestampChoice.widthAnchor.constraint(equalToConstant: touchTargetSize).isActive = true
+		timestampChoice.setContentCompressionResistancePriority(.required, for: .horizontal)
+		let tsLongPress = UILongPressGestureRecognizer(target: self, action: #selector(timestampLongPressed(_:)))
+		tsLongPress.minimumPressDuration = 0.45
+		timestampChoice.addGestureRecognizer(tsLongPress)
+		timestampChoiceButton = timestampChoice
+
+		let photoChoice = makeRootChipButton(accessibilityLabel: "Insert photo") { b in
 			let symFont = UIFontMetrics(forTextStyle: .title3).scaledFont(for: UIFont.systemFont(ofSize: 20, weight: .medium))
 			let cfg = UIImage.SymbolConfiguration(font: symFont, scale: .default)
 			b.setImage(UIImage(systemName: "photo", withConfiguration: cfg), for: .normal)
 			b.tintColor = .label
 		}
 		photoChoice.addTarget(self, action: #selector(goToPhotoScreen), for: .touchUpInside)
+		photoChoice.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
 		rootChoiceStack.addArrangedSubview(styleChoice)
+		rootChoiceStack.addArrangedSubview(bulletChoice)
+		rootChoiceStack.addArrangedSubview(tabChoice)
+		rootChoiceStack.addArrangedSubview(timestampChoice)
 		rootChoiceStack.addArrangedSubview(photoChoice)
 
 		styleStack.axis = .horizontal
@@ -540,23 +880,23 @@ final class MemoRichTextKeyboardAccessoryView: UIView, PHPickerViewControllerDel
 		styleStack.distribution = .equalSpacing
 		styleStack.translatesAutoresizingMaskIntoConstraints = false
 
-		let backStyle = makeIconButton(systemName: "chevron.backward", accessibilityLabel: "戻る")
+		let backStyle = makeIconButton(systemName: "chevron.backward", accessibilityLabel: "Back")
 		backStyle.addTarget(self, action: #selector(goToRoot), for: .touchUpInside)
 
-		let bold = makeIconButton(systemName: "bold", accessibilityLabel: "太字")
+		let bold = makeIconButton(systemName: "bold", accessibilityLabel: "Bold")
 		bold.addTarget(self, action: #selector(boldTapped), for: .touchUpInside)
 
-		let strike = makeIconButton(systemName: "strikethrough", accessibilityLabel: "取り消し線")
+		let strike = makeIconButton(systemName: "strikethrough", accessibilityLabel: "Strikethrough")
 		strike.addTarget(self, action: #selector(strikeTapped), for: .touchUpInside)
 
-		let reset = makeColorChipButton(accessibilityLabel: "標準の色")
+		let reset = makeColorChipButton(accessibilityLabel: "Default color")
 		colorChipView(in: reset)?.backgroundColor = UIColor.label
 		reset.addTarget(self, action: #selector(resetColorTapped), for: .touchUpInside)
 
 		styleStack.addArrangedSubview(bold)
 		styleStack.addArrangedSubview(strike)
 		for _ in 0 ..< 3 {
-			let b = makeColorChipButton(accessibilityLabel: "文字色")
+			let b = makeColorChipButton(accessibilityLabel: "Text color")
 			b.addTarget(self, action: #selector(colorChipTapped(_:)), for: .touchUpInside)
 			accentButtons.append(b)
 			styleStack.addArrangedSubview(b)
@@ -576,11 +916,11 @@ final class MemoRichTextKeyboardAccessoryView: UIView, PHPickerViewControllerDel
 		photoStack.spacing = 12
 		photoStack.distribution = .fillEqually
 		photoStack.translatesAutoresizingMaskIntoConstraints = false
-		let backPhoto = makeIconButton(systemName: "chevron.backward", accessibilityLabel: "戻る")
+		let backPhoto = makeIconButton(systemName: "chevron.backward", accessibilityLabel: "Back")
 		backPhoto.addTarget(self, action: #selector(goToRoot), for: .touchUpInside)
-		let library = makeIconButton(systemName: "photo.on.rectangle.angled", accessibilityLabel: "ライブラリから選ぶ", fillsBarWidth: true)
+		let library = makeIconButton(systemName: "photo.on.rectangle.angled", accessibilityLabel: "Choose from library", fillsBarWidth: true)
 		library.addTarget(self, action: #selector(libraryTapped), for: .touchUpInside)
-		let camera = makeIconButton(systemName: "camera", accessibilityLabel: "カメラで撮影", fillsBarWidth: true)
+		let camera = makeIconButton(systemName: "camera", accessibilityLabel: "Take photo", fillsBarWidth: true)
 		camera.addTarget(self, action: #selector(cameraTapped), for: .touchUpInside)
 		camera.isHidden = !UIImagePickerController.isSourceTypeAvailable(.camera)
 		photoStack.addArrangedSubview(library)
@@ -646,13 +986,31 @@ final class MemoRichTextKeyboardAccessoryView: UIView, PHPickerViewControllerDel
 		}
 	}
 
+	/// `reloadInputViews()` は選択範囲を落とすことがある。スタイル適用は選択に依存するため復元する。
+	private func reloadInputViewsPreservingSelection() {
+		guard let tv = textView else { return }
+		let saved = tv.selectedRange
+		tv.reloadInputViews()
+		let apply: () -> Void = { [weak tv] in
+			guard let tv else { return }
+			let len = (tv.text as NSString).length
+			let loc = min(max(0, saved.location), len)
+			let maxLen = len - loc
+			let safeLen = min(max(0, saved.length), maxLen)
+			tv.selectedRange = NSRange(location: loc, length: safeLen)
+		}
+		apply()
+		// システム側が次フレームで選択をリセットする場合へのフォロー
+		DispatchQueue.main.async(execute: apply)
+	}
+
 	private func showStep(_ newStep: Step) {
 		step = newStep
 		rootChoiceStack.isHidden = newStep != .root
 		styleScreenStack.isHidden = newStep != .style
 		photoScreenStack.isHidden = newStep != .photo
 		updateIntrinsicSize()
-		textView?.reloadInputViews()
+		reloadInputViewsPreservingSelection()
 	}
 
 	@objc private func goToRoot() {
@@ -665,6 +1023,57 @@ final class MemoRichTextKeyboardAccessoryView: UIView, PHPickerViewControllerDel
 
 	@objc private func goToPhotoScreen() {
 		showStep(.photo)
+	}
+
+	@objc private func bulletListTapped() {
+		guard let wrap = textView as? MemoWrappingTextView else { return }
+		wrap.insertWithTypingAttributes("- ")
+	}
+
+	@objc private func tabInsertTapped() {
+		guard let wrap = textView as? MemoWrappingTextView else { return }
+		wrap.insertWithTypingAttributes("\t")
+	}
+
+	@objc private func timestampInsertTapped() {
+		if skipNextTimestampTouchUp {
+			skipNextTimestampTouchUp = false
+			return
+		}
+		guard let wrap = textView as? MemoWrappingTextView else { return }
+		if !MemoTimestampSettings.onboardingComplete {
+			presentTimestampFormatPicker()
+			return
+		}
+		let s = MemoTimestampSettings.formattedNow()
+		wrap.insertWithTypingAttributes(s + " ", uniformBold: MemoTimestampSettings.timestampUseBold)
+	}
+
+	@objc private func timestampLongPressed(_ gr: UILongPressGestureRecognizer) {
+		switch gr.state {
+		case .began:
+			skipNextTimestampTouchUp = true
+			presentTimestampFormatPicker()
+		case .ended, .cancelled, .failed:
+			// 長押しでタッチがキャンセルされると `touchUpInside` が来ない端末があるため、ここでもフラグを戻す。
+			DispatchQueue.main.async { [weak self] in
+				self?.skipNextTimestampTouchUp = false
+			}
+		default:
+			break
+		}
+	}
+
+	private func presentTimestampFormatPicker() {
+		guard let host = textView?.memoContainingViewController() else { return }
+		let content = MemoTimestampOptionsSheetViewController()
+		let nav = UINavigationController(rootViewController: content)
+		nav.modalPresentationStyle = .pageSheet
+		if let src = timestampChoiceButton {
+			nav.popoverPresentationController?.sourceView = src
+			nav.popoverPresentationController?.sourceRect = src.bounds
+		}
+		host.present(nav, animated: true)
 	}
 
 	private func makeRootChipButton(accessibilityLabel: String, content: (UIButton) -> Void) -> UIButton {
@@ -725,11 +1134,35 @@ final class MemoRichTextKeyboardAccessoryView: UIView, PHPickerViewControllerDel
 	}
 
 	private func colorChipView(in button: UIButton) -> UIView? {
-		button.subviews.first(where: { $0 is UIView && !$0.isUserInteractionEnabled })
+		button.subviews.first(where: { !$0.isUserInteractionEnabled })
 	}
 
 	@objc private func boldTapped() {
-		textView?.toggleBoldface(nil)
+		guard let tv = textView else { return }
+		let range = tv.selectedRange
+		if range.length > 0 {
+			let sub = tv.attributedText.attributedSubstring(from: range)
+			var allBold = true
+			sub.enumerateAttribute(.font, in: NSRange(location: 0, length: sub.length)) { val, _, stop in
+				let font = (val as? UIFont) ?? UIFont.preferredFont(forTextStyle: .body)
+				if !font.fontDescriptor.symbolicTraits.contains(.traitBold) {
+					allBold = false
+					stop.pointee = true
+				}
+			}
+			let setBold = !allBold
+			tv.textStorage.beginEditing()
+			tv.textStorage.enumerateAttribute(.font, in: range, options: []) { val, r, _ in
+				let font = (val as? UIFont) ?? UIFont.preferredFont(forTextStyle: .body)
+				tv.textStorage.addAttribute(.font, value: font.memoFontWithUniformBold(setBold), range: r)
+			}
+			tv.textStorage.endEditing()
+		} else {
+			var ta = tv.typingAttributes
+			let font = (ta[.font] as? UIFont) ?? UIFont.preferredFont(forTextStyle: .body)
+			ta[.font] = font.memoFontWithBoldToggled()
+			tv.typingAttributes = ta
+		}
 		notifyContentChange()
 	}
 

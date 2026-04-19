@@ -6,6 +6,10 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		8A766FB22F8D193C008D98C6 /* SVGKit in Frameworks */ = {isa = PBXBuildFile; productRef = 8A766FB12F8D193C008D98C6 /* SVGKit */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXFileReference section */
 		8A766FA02F8D193A008D98C6 /* scroll.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = scroll.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
@@ -23,6 +27,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				8A766FB22F8D193C008D98C6 /* SVGKit in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -65,6 +70,7 @@
 			);
 			name = scroll;
 			packageProductDependencies = (
+				8A766FB12F8D193C008D98C6 /* SVGKit */,
 			);
 			productName = scroll;
 			productReference = 8A766FA02F8D193A008D98C6 /* scroll.app */;
@@ -94,6 +100,9 @@
 			);
 			mainGroup = 8A766F972F8D193A008D98C6;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				8A766FB02F8D193C008D98C6 /* XCRemoteSwiftPackageReference "SVGKit" */,
+			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 8A766FA12F8D193A008D98C6 /* Products */;
 			projectDirPath = "";
@@ -272,7 +281,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.0;
+				MARKETING_VERSION = 1.1;
 				PRODUCT_BUNDLE_IDENTIFIER = khirooka.scroll;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
@@ -315,7 +324,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.0;
+				MARKETING_VERSION = 1.1;
 				PRODUCT_BUNDLE_IDENTIFIER = khirooka.scroll;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
@@ -354,6 +363,25 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		8A766FB02F8D193C008D98C6 /* XCRemoteSwiftPackageReference "SVGKit" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/SVGKit/SVGKit";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 3.0.0;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		8A766FB12F8D193C008D98C6 /* SVGKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 8A766FB02F8D193C008D98C6 /* XCRemoteSwiftPackageReference "SVGKit" */;
+			productName = SVGKit;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = 8A766F982F8D193A008D98C6 /* Project object */;
 }
