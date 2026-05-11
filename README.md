@@ -1,4 +1,4 @@
-# scroll（Monote）
+# Monote
 
 縦スクロール中心の長文メモ／ジャーナル向け **iOS アプリ** です。1 行ずつ `UITextView` で編集し、ブロック単位で JSON に永続化します。利用可能なら **iCloud Drive** 上のコンテナに保存し、端末間で同期します（未利用時はローカル `Documents` にフォールバック）。
 
