@@ -1,0 +1,2 @@
+// Optional local build settings (not committed). Copy LocalOverrides.xcconfig.example.
+#include? "LocalOverrides.xcconfig"

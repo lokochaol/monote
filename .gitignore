@@ -1,17 +1,81 @@
 .DS_Store
+.AppleDouble
+.LSOverride
 
 # Cursor / local tooling
 .cursor/
 
-# Xcode
+# Xcode — user/machine state
 DerivedData/
+build/
 *.xcuserstate
 *.xccheckout
 *.xcscmblueprint
 xcuserdata/
+*.xcodeproj/xcuserdata/
 *.moved-aside
-*.xcworkspace/xcuserdata/
+*.pbxuser
+*.mode1v3
+*.mode2v3
+*.perspectivev3
+*.hmap
+*.ipa
+*.dSYM
+*.dSYM.zip
+*.xcarchive
+*.xctestrun
 
-# SwiftPM (if ever used)
+# SwiftPM
 .build/
+.swiftpm/configuration/registries.json
+.swiftpm/xcode/xcuserdata/
 
+# CocoaPods / Carthage (if added later)
+Pods/
+Carthage/Build/
+
+# Logs & test / crash artifacts
+*.log
+logs/
+Logs/
+*.xcresult
+*.crash
+
+# Playgrounds
+timeline.xctimeline
+playground.xcworkspace
+
+# Certificates, provisioning, API keys (never commit)
+*.p12
+*.mobileprovision
+*.provisionprofile
+*.cer
+*.pem
+*.certSigningRequest
+AuthKey_*.p8
+
+# Environment & local secrets
+.env
+.env.*
+!.env.example
+
+# Xcode — local signing overrides (see LocalOverrides.xcconfig.example)
+LocalOverrides.xcconfig
+
+# Ruby (CocoaPods / fastlane)
+vendor/bundle/
+.bundle/
+
+# fastlane — outputs & local metadata (keep fastlane/Fastfile etc. tracked)
+fastlane/report.xml
+fastlane/Preview.html
+fastlane/screenshots/**/*.png
+fastlane/test_output
+fastlane/.env
+fastlane/.env.*
+
+# Editor / merge junk
+*.orig
+*~
+*.swp
+*.swo

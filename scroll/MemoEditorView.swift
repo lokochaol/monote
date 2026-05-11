@@ -4,6 +4,8 @@
 //
 
 import SwiftUI
+import Combine
+import os
 #if canImport(UIKit)
 import UIKit
 #endif
@@ -58,6 +60,11 @@ struct MemoEditorView: View {
 	/// 起動直後のみ。末尾行フォーカス＋キーボード表示まで本文を隠す。
 	@State private var initialBootComplete = false
 	@State private var initialBootDebugFallbackTask: Task<Void, Never>?
+	/// 初回ブート時のみ、末尾行へ届くまで `scrollTo` を追い打ちするタスク。
+	@State private var initialBootTailScrollRetryTask: Task<Void, Never>?
+	/// ScrollView のビューポート高さ。本文が短いとき、末尾より下の余白を
+	/// 「末尾行をフォーカスするタップ領域」で埋めるのに使う。
+	@State private var scrollViewportHeight: CGFloat = 0
 
 	// MARK: - 複数行選択モード用の View 側状態
 	/// 選択オーバーレイがヒットテストに使う、行 ID → グローバル座標系の矩形。
@@ -80,20 +87,32 @@ struct MemoEditorView: View {
 	private let keyboardAdjustScrollDelayNanos: UInt64 = 120_000_000
 
 	var body: some View {
+		let _ = MemoSignpost.signposter.emitEvent("MemoEditorView.body")
 		NavigationStack {
 			ZStack(alignment: .top) {
 				MemoJournalPalette.paperBackground()
 				ScrollViewReader { proxy in
 					ScrollView {
-						LazyVStack(alignment: .leading, spacing: 0) {
-							headSentinel
-							ForEach(Array(model.visibleLines.enumerated()), id: \.element.id) { index, line in
-								lineRow(line: line, index: index)
+						VStack(spacing: 0) {
+							LazyVStack(alignment: .leading, spacing: 0) {
+								headSentinel
+								ForEach(Array(model.visibleLines.enumerated()), id: \.element.id) { index, line in
+									lineRow(line: line, index: index)
+								}
 							}
+							.padding(.horizontal, MemoJournalPalette.horizontalInset)
+							.padding(.top, 10)
+
+							tailTapFiller
 						}
-						.padding(.horizontal, MemoJournalPalette.horizontalInset)
-						.padding(.top, 10)
-						.padding(.bottom, 28)
+						.frame(minHeight: scrollViewportHeight, alignment: .top)
+					}
+					.background {
+						GeometryReader { geo in
+							Color.clear
+								.onAppear { scrollViewportHeight = geo.size.height }
+								.onChange(of: geo.size.height) { _, h in scrollViewportHeight = h }
+						}
 					}
 					.scrollDismissesKeyboard(.never)
 					.scrollContentBackground(.hidden)
@@ -214,10 +233,15 @@ struct MemoEditorView: View {
 				if !didBootstrap {
 					didBootstrap = true
 					model.attachSyncCoordinator(NoOpMemoSyncCoordinator.shared)
-					model.bootstrap(screenHeight: bootstrapScreenHeight())
-					restoreEditorFocusAtBootstrap()
-					scheduleInitialBootDebugFallbackIfNeeded()
-					evaluateInitialBootComplete()
+					// `bootstrap` は iCloud Drive ルートの解決を含むため async。
+					// `.onAppear` 自体は同期だが、Task で async 経路へ橋渡しする。
+					// 解決が長引いてもタイムアウトで諦めてローカルにフォールバックするので、UI が無限に待たされることはない。
+					Task { @MainActor in
+						await model.bootstrap(screenHeight: bootstrapScreenHeight())
+						restoreEditorFocusAtBootstrap()
+						scheduleInitialBootDebugFallbackIfNeeded()
+						evaluateInitialBootComplete()
+					}
 					return
 				}
 			}
@@ -275,6 +299,26 @@ struct MemoEditorView: View {
 						.accessibilityLabel(Text("Redo"))
 					}
 				}
+				ToolbarItem(placement: .principal) {
+					// iCloud 同期インジケータ。bootstrap 完了前は描画しない（状態が `.unknown` のまま揺れるのを避ける）。
+					// タップでアプリ内設定シートが開き、ユーザは iCloud 同期の ON / OFF と
+					// iOS 設定アプリへの遷移ができる。
+					if initialBootComplete, !model.isSelectionMode {
+						MemoICloudStatusButton(
+							status: model.iCloudStatus,
+							isTransferring: model.iCloudTransferActive,
+							onToggle: { newValue in
+								await model.toggleICloudSync(enabled: newValue)
+							},
+							onFetchDiagnostics: {
+								await model.fetchStorageDiagnostics()
+							},
+							onEvictUnused: {
+								await model.evictUnusedICloudItems()
+							}
+						)
+					}
+				}
 				ToolbarItem(placement: .topBarTrailing) {
 					// ローディングオーバーレイ表示中はツールバーごと隠している（上の `.toolbar(.hidden, ...)`）が、
 					// 念のためボタン側でも初期化前は描画しない。
@@ -294,6 +338,11 @@ struct MemoEditorView: View {
 						}
 					}
 				}
+			}
+			.onReceive(Timer.publish(every: 2.5, tolerance: 0.5, on: .main, in: .common).autoconnect()) { _ in
+				guard initialBootComplete else { return }
+				guard model.iCloudStatus == .synced else { return }
+				Task { await model.refreshICloudTransferState() }
 			}
 			.sheet(isPresented: $showSearch) {
 				MemoKeywordSearchSheet(model: model, isPresented: $showSearch)
@@ -414,8 +463,42 @@ struct MemoEditorView: View {
 #endif
 		initialBootDebugFallbackTask?.cancel()
 		initialBootDebugFallbackTask = nil
+		initialBootTailScrollRetryTask?.cancel()
+		initialBootTailScrollRetryTask = nil
 		withAnimation(.easeOut(duration: 0.28)) {
 			initialBootComplete = true
+		}
+	}
+
+	/// build 後の初回起動などで ScrollView / LazyVStack / UITextView のウォームアップが遅いと、
+	/// `restoreEditorFocusAtBootstrap` で 1 回だけ立てた `lineIdToScrollIntoView` 経由の
+	/// `scrollTo` が末尾行の実体化前に空振りし、画面が末尾ブロックの先頭付近で止まってしまう。
+	/// 末尾行が LazyVStack で実体化されれば `MemoLineTextView.updateUIView` が `becomeFirstResponder()`
+	/// を実行してキーボードも開くため、末尾へ届くまで複数回スクロールを追い打ちする。
+	private func scheduleInitialBootstrapTailScrollRetries(tailId: UUID) {
+		initialBootTailScrollRetryTask?.cancel()
+		initialBootTailScrollRetryTask = Task { @MainActor in
+			let retryDelaysNanos: [UInt64] = [
+				220_000_000,
+				520_000_000,
+				960_000_000,
+				1_600_000_000,
+			]
+			for delay in retryDelaysNanos {
+				try? await Task.sleep(nanoseconds: delay)
+				guard !Task.isCancelled else { return }
+				guard !initialBootComplete else { return }
+				guard let currentTail = model.currentTailLineId(), currentTail == tailId else { return }
+				// キーボードまで出ていれば `evaluateInitialBootComplete` が近く true にするため追い打ち不要。
+				if keyboardTopScreenY != nil, focusedLineId == tailId { return }
+				// onChange を再発火させて、既存の 48ms 遅延スクロール経路に再投入する。
+				lineIdToScrollIntoView = nil
+				try? await Task.sleep(nanoseconds: 16_000_000)
+				guard !Task.isCancelled else { return }
+				focusedLineId = tailId
+				lineIdToScrollIntoView = tailId
+			}
+			initialBootTailScrollRetryTask = nil
 		}
 	}
 
@@ -433,6 +516,30 @@ struct MemoEditorView: View {
 			}
 		}
 #endif
+	}
+
+	/// 最終行より下の余白。本文が短いうちはビューポート下端まで広がるフィラーになり、
+	/// タップすると最終行の末尾へフォーカスが移る。
+	private var tailTapFiller: some View {
+		Color.clear
+			.frame(maxWidth: .infinity)
+			.frame(minHeight: 28)
+			.contentShape(Rectangle())
+			.layoutPriority(-1)
+			.onTapGesture {
+				focusTailLineEnd()
+			}
+	}
+
+	/// 余白タップ時: 最終行の末尾にキャレットを置いてフォーカスする。
+	private func focusTailLineEnd() {
+		guard !model.isSelectionMode else { return }
+		guard let tail = model.visibleLines.last else { return }
+		let caret = (tail.text as NSString).length
+		mergeCaret = (tail.id, caret)
+		focusedCaretUTF16 = caret
+		focusedLineId = tail.id
+		lineIdToScrollIntoView = tail.id
 	}
 
 	private var headSentinel: some View {
@@ -473,6 +580,7 @@ struct MemoEditorView: View {
 		mergeCaret = nil
 		lineIdToScrollIntoView = id
 		focusedLineId = id
+		scheduleInitialBootstrapTailScrollRetries(tailId: id)
 	}
 
 	/// 復帰時は既存の末尾行へフォーカスするだけで、自動で空行は足さない。
@@ -562,13 +670,6 @@ struct MemoEditorView: View {
 			.disabled(!hasSelection)
 			.foregroundStyle(hasSelection ? Color.primary : Color.secondary.opacity(0.5))
 			.accessibilityLabel(Text("Copy"))
-			.overlay(alignment: .top) {
-				if showCopiedToast {
-					copiedToastBubble
-						.offset(y: -44)
-						.transition(.scale.combined(with: .opacity))
-				}
-			}
 
 			Button {
 				showDeleteConfirm = true
@@ -589,6 +690,19 @@ struct MemoEditorView: View {
 			barShape.fill(.regularMaterial)
 		)
 		.clipShape(barShape)
+		.overlay(alignment: .top) {
+			if showCopiedToast {
+				HStack(spacing: 0) {
+					copiedToastBubble
+						.frame(maxWidth: .infinity)
+					Color.clear
+						.frame(maxWidth: .infinity)
+				}
+				.offset(y: -46)
+				.transition(.scale.combined(with: .opacity))
+				.allowsHitTesting(false)
+			}
+		}
 		.padding(.horizontal, MemoJournalPalette.horizontalInset)
 		.padding(.bottom, 8)
 	}

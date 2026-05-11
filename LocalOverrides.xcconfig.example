@@ -1,0 +1,7 @@
+// リポジトリ直下に `LocalOverrides.xcconfig` としてコピーし、自分の Apple Developer Team ID を設定してください。
+// このファイルは Git に含めず（.gitignore 済み）、公開リポジトリにチーム ID を載せません。
+//
+// cp LocalOverrides.xcconfig.example LocalOverrides.xcconfig
+// その後、YOUR_TEAM_ID_HERE を Xcode → Settings → Accounts で確認できる 10 桁の Team ID に置き換えてください。
+
+DEVELOPMENT_TEAM = YOUR_TEAM_ID_HERE

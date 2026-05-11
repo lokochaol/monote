@@ -5,7 +5,7 @@
 
 import Foundation
 
-struct MemoLine: Identifiable, Codable, Equatable, Hashable {
+struct MemoLine: Identifiable, Codable, Equatable, Hashable, Sendable {
 	var id: UUID
 	/// プレーン（検索・互換用）。リッチと常に `attributed.string` で一致させる。
 	var text: String

@@ -17,13 +17,13 @@ final class MemoEditorUndoManager {
 		case structural
 	}
 
-	struct PendingRichEntry: Codable, Equatable {
+	struct PendingRichEntry: Codable, Equatable, Sendable {
 		var lineId: UUID
 		/// `NSKeyedArchiver` で出力した `NSAttributedString` のバイト列。
 		var archive: Data
 	}
 
-	struct Snapshot: Codable {
+	struct Snapshot: Codable, Sendable {
 		var visibleLines: [MemoLine]
 		var pendingRich: [PendingRichEntry]
 		var globalLineOffset: Int
@@ -44,6 +44,10 @@ final class MemoEditorUndoManager {
 
 	/// 履歴の最大段数。これを超えたぶんは古いほうから捨てる。
 	private let maxEntries = 80
+	/// スタック全体で保持を許す `pendingRich.archive` の合計バイト数のソフトリミット。
+	/// 画像添付のある行を含む編集では 1 スナップショットが数 MB になるため、段数だけで頭打ちすると
+	/// すぐに数百 MB に達して OOM kill される。これを超えたら古いスナップショットから捨てる。
+	private let maxPendingRichTotalBytes: Int = 24 * 1024 * 1024
 	/// 連続するテキスト編集をまとめる無入力猶予時間。
 	private let coalesceWindow: TimeInterval = 0.6
 
@@ -82,11 +86,35 @@ final class MemoEditorUndoManager {
 		snap.kind = kind
 		snap.capturedAt = now
 		undoStack.append(snap)
+		enforceEntryCap()
+		enforceByteBudget()
+		lastRecordedAt = now
+		lastRecordedKind = kind
+	}
+
+	/// 段数上限を満たすよう、古い undo から順に捨てる。
+	private func enforceEntryCap() {
 		if undoStack.count > maxEntries {
 			undoStack.removeFirst(undoStack.count - maxEntries)
 		}
-		lastRecordedAt = now
-		lastRecordedKind = kind
+	}
+
+	/// `pendingRich.archive` の合計バイト数のソフトリミットを超えていれば、古い undo から順に捨てる。
+	/// undo スタック優先で削り、それでも超えていれば redo からも古い側を削る。
+	/// 常に最新 1 件の undo は残す（ここを削ると直前の 1 操作が取り消せなくなって UX 上の痛みが大きい）。
+	private func enforceByteBudget() {
+		func totalBytes() -> Int {
+			var total = 0
+			for s in undoStack { for e in s.pendingRich { total += e.archive.count } }
+			for s in redoStack { for e in s.pendingRich { total += e.archive.count } }
+			return total
+		}
+		while totalBytes() > maxPendingRichTotalBytes, undoStack.count > 1 {
+			undoStack.removeFirst()
+		}
+		while totalBytes() > maxPendingRichTotalBytes, !redoStack.isEmpty {
+			redoStack.removeFirst()
+		}
 	}
 
 	/// 明示的にコアレスの区切りを入れる（フォーカス喪失・undo/redo 直後など）。
@@ -123,28 +151,31 @@ final class MemoEditorUndoManager {
 		breakCoalescing()
 	}
 
-	// MARK: - 永続化
+	// MARK: - 永続化（メモリ常駐のみ）
+	//
+	// 以前は `Persisted { undo, redo }` を JSON にシリアライズしてディスクに保存していたが、
+	// 1 スナップショットは `visibleLines` と `NSAttributedString` のアーカイブ `Data` を丸ごと含むため、
+	// 画像添付のある行を持つドキュメントでは最大 80 件 × 数 MB で数百 MB に膨らむ。
+	// 起動時の `loadFromDisk` で `Data(contentsOf:)` + `JSONDecoder.decode` がピーク時にその倍のメモリを要し、
+	// 起動直後から高い水位になって「少しの打鍵で OOM kill される」一因になっていた。
+	//
+	// undo/redo はセッション内で完結するのが一般的な UX なので、ここではディスク永続化をやめてメモリ常駐だけにする。
+	// 互換目的で旧来の `undo_stack.json` が残っていれば起動時に削除する。
 
-	private struct Persisted: Codable {
-		var undo: [Snapshot]
-		var redo: [Snapshot]
+	/// 以前のバージョンが残した `undo_stack.json` を削除する。
+	/// 起動時に呼ぶと、巨大な古い履歴ファイルを読み込むことによるメモリスパイクを避けられる。
+	func discardPersistedStackIfPresent(at url: URL) {
+		try? FileManager.default.removeItem(at: url)
 	}
 
-	func saveToDisk(at url: URL) {
-		let payload = Persisted(undo: undoStack, redo: redoStack)
-		guard let data = try? JSONEncoder().encode(payload) else { return }
-		try? data.write(to: url, options: .atomic)
-	}
+	/// 互換用のダミー。新規実装ではディスク保存は行わないが、呼び出し側の経路を温存するため no-op で残す。
+	func saveToDiskAsync(at _: URL) async { /* no-op: in-memory only */ }
 
+	/// 互換用のダミー。旧ファイルが残っていれば削除する以外は何もしない。
 	func loadFromDisk(at url: URL) {
-		guard let data = try? Data(contentsOf: url) else { return }
-		guard let payload = try? JSONDecoder().decode(Persisted.self, from: data) else {
-			// 破損時は黙って捨てる（ファイル自体も消してもう読まれないようにする）。
-			try? FileManager.default.removeItem(at: url)
-			return
-		}
-		undoStack = payload.undo
-		redoStack = payload.redo
+		discardPersistedStackIfPresent(at: url)
+		undoStack.removeAll()
+		redoStack.removeAll()
 		breakCoalescing()
 	}
 }

@@ -3,10 +3,13 @@
 //  scroll
 //
 
+import ImageIO
 import PhotosUI
 import SVGKit
 import SwiftUI
 import UIKit
+import UniformTypeIdentifiers
+import os
 
 // MARK: - プレビュー枠を固定（モーダル後に `bounds` が 0 に戻って実寸表示になるのを防ぐ）
 
@@ -14,6 +17,11 @@ import UIKit
 private final class MemoPreviewImageAttachment: NSTextAttachment {
 	private static let codingPreviewW = "MemoInlinePreviewW"
 	private static let codingPreviewH = "MemoInlinePreviewH"
+	/// 新フォーマット: `contents`（オリジナル画像バイト列）の中身を外部ストアに退避し、
+	/// アーカイブにはハッシュ参照だけを乗せる。`MemoLine` を持ち回るときの RAM 占有を激減させる目的。
+	private static let codingContentsRefHash = "MemoInlineContentsRefHash"
+	private static let codingContentsRefExt = "MemoInlineContentsRefExt"
+	private static let codingContentsRefFileType = "MemoInlineContentsRefFileType"
 
 	/// レイアウト用の表示枠。`bounds` が無効でも `attachmentBounds` はここを使う。
 	var previewLayoutSize: CGSize
@@ -50,12 +58,57 @@ private final class MemoPreviewImageAttachment: NSTextAttachment {
 		} else {
 			previewLayoutSize = CGSize(width: 120, height: 120)
 		}
+		// 新フォーマット: `super.init(coder:)` 段階では `contents` が空で、ハッシュ参照だけが乗っている。
+		// 外部ストア（`MemoAttachmentStore`）からオリジナルバイトを引いて `contents` に再装填する。
+		// 旧フォーマット（インライン埋め込み）は `super` がすでに `contents` を埋めているので何もしない。
+		if (contents == nil || contents?.isEmpty == true),
+		   let hex = coder.decodeObject(of: NSString.self, forKey: Self.codingContentsRefHash) as String? {
+			let ext = (coder.decodeObject(of: NSString.self, forKey: Self.codingContentsRefExt) as String?) ?? "bin"
+			if let data = MemoAttachmentStore.read(hashHex: hex, ext: ext) {
+				contents = data
+			}
+			if let storedFileType = coder.decodeObject(of: NSString.self, forKey: Self.codingContentsRefFileType) as String?,
+			   !storedFileType.isEmpty {
+				fileType = storedFileType
+			}
+		}
+		// 復元経路では `.contents` にオリジナルの画像データが入っている想定。
+		// `.image` を常にプレビュー枠相当のサムネイルに落としておき、初回表示時の
+		// メインスレッド上での巨大ビットマップデコードを避ける。
+		if previewLayoutSize.width > 0, previewLayoutSize.height > 0,
+		   let data = contents,
+		   let thumb = MemoImageInsertion.downsampledImage(fromData: data, pointSize: previewLayoutSize) {
+			image = thumb
+		}
 	}
 
 	override class var supportsSecureCoding: Bool { true }
 
 	override func encode(with coder: NSCoder) {
+		// `contents` のオリジナル画像バイト列はアーカイブに直接埋め込まず、
+		// `MemoAttachmentStore` 配下のファイルへ書き出してハッシュだけ乗せる。
+		// 一時的に `self.contents = nil` にして `super.encode(with:)` を呼ぶことで、
+		// `NSTextAttachment` 標準の経路がインラインバイトを書き込まないようにする。
+		// 書き出し後に元へ戻すため、現在描画中のインスタンスは引き続き使える。
+		var savedContents: Data?
+		var didExternalize = false
+		if let data = contents, !data.isEmpty {
+			let ext = MemoAttachmentStore.preferredExtension(forFileType: fileType)
+			if let hex = MemoAttachmentStore.write(data: data, ext: ext) {
+				savedContents = data
+				contents = nil
+				didExternalize = true
+				coder.encode(hex as NSString, forKey: Self.codingContentsRefHash)
+				coder.encode(ext as NSString, forKey: Self.codingContentsRefExt)
+				if let ft = fileType {
+					coder.encode(ft as NSString, forKey: Self.codingContentsRefFileType)
+				}
+			}
+		}
 		super.encode(with: coder)
+		if didExternalize {
+			contents = savedContents
+		}
 		coder.encode(Double(previewLayoutSize.width), forKey: Self.codingPreviewW)
 		coder.encode(Double(previewLayoutSize.height), forKey: Self.codingPreviewH)
 	}
@@ -91,8 +144,13 @@ enum MemoImageInsertion {
 	private static let previewWidthFraction: CGFloat = 0.38
 	/// プレビュー枠の最大高さ（縦長写真で行が伸びすぎないように）
 	private static let previewMaxHeight: CGFloat = 200
+	/// プレビュー用サムネイルを生成する際の Retina 余裕倍率。
+	/// @3x 端末でも原寸より一段階引き上げた解像度を持たせる。
+	fileprivate static let previewScaleHeadroom: CGFloat = 3
 
-	/// 画像は解像度そのまま `attachment.image` に載せ、**表示サイズは `bounds` のみ**で抑える（別解像度のプレビュー用ビットマップは作らない）。
+	/// 表示は軽量なサムネイルに差し替え、元データは `attachment.contents` に保持する。
+	/// フルスクリーン表示時は `fullImage(from:)` が `contents` を優先して使うため、
+	/// タップ時の解像度は従来と同等を維持できる。
 	static func insertImage(_ image: UIImage, into textView: UITextView) {
 		let insetW = textView.textContainerInset.left + textView.textContainerInset.right + textView.textContainer.lineFragmentPadding * 2
 		let containerW = max(1, textView.bounds.width - insetW)
@@ -109,9 +167,23 @@ enum MemoImageInsertion {
 			displayW = displayH * (iw / ih)
 		}
 
+		let previewSize = CGSize(width: displayW, height: displayH)
+		let (originalData, uti) = encodedOriginalData(from: image)
+		let thumbnail: UIImage = {
+			if let originalData,
+			   let d = downsampledImage(fromData: originalData, pointSize: previewSize) {
+				return d
+			}
+			return downsampledImage(fromImage: image, pointSize: previewSize)
+		}()
+
 		let midY = (font.capHeight - displayH) / 2
-		let attachment = MemoPreviewImageAttachment(image: image, previewLayoutSize: CGSize(width: displayW, height: displayH))
+		let attachment = MemoPreviewImageAttachment(image: thumbnail, previewLayoutSize: previewSize)
 		attachment.bounds = CGRect(x: 0, y: midY, width: displayW, height: displayH)
+		if let originalData {
+			attachment.contents = originalData
+			attachment.fileType = uti
+		}
 
 		let attrString = NSMutableAttributedString(attachment: attachment)
 		let baseAttrs = MemoRichTextEncoding.defaultTypingAttributes()
@@ -130,6 +202,56 @@ enum MemoImageInsertion {
 			return img
 		}
 		return attachment.image
+	}
+
+	// MARK: - ダウンサンプリング補助
+
+	/// `Data`（PNG/JPEG/HEIC 等）から ImageIO で直接サムネイルを生成する。
+	/// フル解像度で `UIImage(data:)` → リサイズするより CPU/メモリ共に軽い。
+	/// アーカイブ復元経路 (`MemoPreviewImageAttachment.init?(coder:)`) と
+	/// 挿入経路の両方から呼ばれる。
+	static func downsampledImage(fromData data: Data, pointSize: CGSize, scaleHeadroom: CGFloat = previewScaleHeadroom) -> UIImage? {
+		guard pointSize.width > 0, pointSize.height > 0 else { return nil }
+		guard let src = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
+		let maxPx = max(pointSize.width, pointSize.height) * scaleHeadroom
+		let opts: [CFString: Any] = [
+			kCGImageSourceCreateThumbnailFromImageAlways: true,
+			kCGImageSourceShouldCacheImmediately: true,
+			kCGImageSourceCreateThumbnailWithTransform: true,
+			kCGImageSourceThumbnailMaxPixelSize: maxPx
+		]
+		guard let cg = CGImageSourceCreateThumbnailAtIndex(src, 0, opts as CFDictionary) else { return nil }
+		return UIImage(cgImage: cg, scale: scaleHeadroom, orientation: .up)
+	}
+
+	/// `Data` 経路で失敗した場合のフォールバック。`UIImage` を直接リサイズする。
+	fileprivate static func downsampledImage(fromImage image: UIImage, pointSize: CGSize, scaleHeadroom: CGFloat = previewScaleHeadroom) -> UIImage {
+		guard pointSize.width > 0, pointSize.height > 0 else { return image }
+		let fmt = UIGraphicsImageRendererFormat.default()
+		fmt.scale = scaleHeadroom
+		fmt.opaque = false
+		let renderer = UIGraphicsImageRenderer(size: pointSize, format: fmt)
+		return renderer.image { _ in
+			image.draw(in: CGRect(origin: .zero, size: pointSize))
+		}
+	}
+
+	/// `UIImage` をオリジナル品質に近い `Data` にエンコードし、対応する UTI を返す。
+	/// アルファチャネルを持つ画像のみ PNG、それ以外は JPEG。
+	private static func encodedOriginalData(from image: UIImage) -> (data: Data?, uti: String) {
+		let hasAlpha: Bool = {
+			guard let cg = image.cgImage else { return true }
+			switch cg.alphaInfo {
+			case .none, .noneSkipLast, .noneSkipFirst:
+				return false
+			default:
+				return true
+			}
+		}()
+		if hasAlpha {
+			return (image.pngData(), UTType.png.identifier)
+		}
+		return (image.jpegData(compressionQuality: 0.92), UTType.jpeg.identifier)
 	}
 
 	static func presentFullscreen(for attachment: NSTextAttachment, from view: UIView) {
@@ -608,9 +730,24 @@ struct MemoLineTextView: UIViewRepresentable {
 	}
 
 	func updateUIView(_ uiView: UITextView, context: Context) {
-		context.coordinator.parent = self
-		context.coordinator.accessory?.attach(to: uiView)
-		context.coordinator.accessory?.setAccentColors(MemoJournalPalette.formatBarUIColors())
+		let state = MemoSignpost.signposter.beginInterval("MemoLineTextView.updateUIView")
+		defer { MemoSignpost.signposter.endInterval("MemoLineTextView.updateUIView", state) }
+
+		let coord = context.coordinator
+		coord.parent = self
+
+		// アクセサリの差し込みは UITextView 1 個あたり 1 回きりで十分。
+		// `makeUIView` で既に attach しているため、通常は何もしない。
+		if coord.lastAttachedAccessoryTextView !== uiView {
+			coord.accessory?.attach(to: uiView)
+			coord.lastAttachedAccessoryTextView = uiView
+		}
+		// アクセントカラーは `UIColor` のダイナミックカラー経由で trait に追従するので、
+		// 一度設定すれば以降のテーマ切替も UIKit が面倒を見てくれる。毎キー再適用する必要はない。
+		if !coord.didApplyAccentColors {
+			coord.accessory?.setAccentColors(MemoJournalPalette.formatBarUIColors())
+			coord.didApplyAccentColors = true
+		}
 
 		// 選択モード中などで完全に操作を止める。first responder を握ったままだと
 		// 誤って編集が再開するため、必要なら resign も行う。
@@ -622,23 +759,49 @@ struct MemoLineTextView: UIViewRepresentable {
 		}
 
 		let base = attributed
-		let target: NSAttributedString = {
-			if !isFocused, let q = highlightQuery, !q.isEmpty {
-				return Self.makeHighlighted(attr: base, query: q, alpha: highlightAlpha)
+		// ハイライト生成は (source, query, alpha) が同じならキャッシュを使い回す。
+		// 検索結果オーバーレイを表示しながらの編集で、関係のない行の再生成が走るのを防ぐ。
+		let target: NSAttributedString
+		if !isFocused, let q = highlightQuery, !q.isEmpty {
+			if coord.lastHighlightSource === base,
+			   coord.lastHighlightQuery == q,
+			   coord.lastHighlightAlpha == highlightAlpha,
+			   let cached = coord.lastHighlightResult {
+				target = cached
+			} else {
+				let made = Self.makeHighlighted(attr: base, query: q, alpha: highlightAlpha)
+				coord.lastHighlightSource = base
+				coord.lastHighlightQuery = q
+				coord.lastHighlightAlpha = highlightAlpha
+				coord.lastHighlightResult = made
+				target = made
 			}
-			return base
-		}()
+		} else {
+			coord.lastHighlightSource = nil
+			coord.lastHighlightQuery = nil
+			coord.lastHighlightAlpha = nil
+			coord.lastHighlightResult = nil
+			target = base
+		}
 
 		// IME 変換中（marked text）がある状態で本文を差し替えると、変換が毎入力で確定してしまう。
 		let isComposing = uiView.markedTextRange != nil
 		// `isFocused`（SwiftUI の focusedLineId）だけでは第一応答者と 1 フレームずれることがある（LazyVStack・
 		// 行レイアウト変化など）。その間に本文を差し替えると `typingAttributes` が落ち、直後の太字などが無効になる。
-		let plainMatchesModel = target.string == (uiView.text ?? "")
-		let skipBodyReplace = isComposing || (uiView.isFirstResponder && plainMatchesModel)
-		if !skipBodyReplace {
-			if !target.isEqual(to: uiView.attributedText) {
-				uiView.attributedText = target
+		if coord.lastAppliedAttributed === target {
+			// 前回適用したインスタンスと同じなら、uiView.attributedText も同一内容のはず。
+			// 一番重い `isEqual:` の deep compare と `target.string == uiView.text` まるごと省ける。
+		} else {
+			let plainMatchesModel = target.string == (uiView.text ?? "")
+			let skipBodyReplace = isComposing || (uiView.isFirstResponder && plainMatchesModel)
+			if !skipBodyReplace {
+				if !target.isEqual(to: uiView.attributedText) {
+					uiView.attributedText = target
+				}
 			}
+			// skipBodyReplace の場合も、UIKit 側が打鍵で attributedText を更新しているので
+			// 次回は identity 一致で短絡させたい。いずれにせよ最新参照を記録する。
+			coord.lastAppliedAttributed = target
 		}
 
 		if let off = pendingCaretUTF16 {
@@ -655,6 +818,11 @@ struct MemoLineTextView: UIViewRepresentable {
 			context.coordinator.lastSyncedIsFocused = isFocused
 			context.coordinator.scheduleResponderSync(wantFocus: isFocused, textView: uiView)
 		}
+
+		// 復元直後（既存メモを開いた／検索ヒットへジャンプした等）に、未取得のリンクチップへ
+		// `LPMetadataProvider` でページタイトルを取りに行く。`MemoLinkMetadataCache` 側で URL 単位に
+		// 同期キャッシュ＋ in-flight 重複排除されるため、updateUIView から何度呼んでも安全。
+		MemoLinkChipInsertion.scheduleMetadataRefresh(in: uiView)
 	}
 
 	private static func makeHighlighted(attr: NSAttributedString, query: String, alpha: CGFloat?) -> NSMutableAttributedString {
@@ -680,6 +848,18 @@ struct MemoLineTextView: UIViewRepresentable {
 		weak var accessory: MemoRichTextKeyboardAccessoryView?
 		private var responderApplyWorkItem: DispatchWorkItem?
 
+		/// 直近 `updateUIView` で適用した attributed。identity 一致なら重い deep compare を丸ごと省く。
+		var lastAppliedAttributed: NSAttributedString?
+		/// 直近ハイライト生成時の (source, query, alpha, result)。同じなら `makeHighlighted` を再実行しない。
+		var lastHighlightSource: NSAttributedString?
+		var lastHighlightQuery: String?
+		var lastHighlightAlpha: CGFloat?
+		var lastHighlightResult: NSAttributedString?
+		/// アクセサリを attach した UITextView。再アタッチが必要なのは view が差し替わったときだけ。
+		weak var lastAttachedAccessoryTextView: UITextView?
+		/// アクセントカラー適用済みフラグ（ダイナミックカラーなので trait 切替でも再適用不要）。
+		var didApplyAccentColors: Bool = false
+
 		deinit {
 			responderApplyWorkItem?.cancel()
 		}
@@ -687,14 +867,39 @@ struct MemoLineTextView: UIViewRepresentable {
 		func scheduleResponderSync(wantFocus: Bool, textView: UITextView) {
 			responderApplyWorkItem?.cancel()
 			guard wantFocus else { return }
-			let item = DispatchWorkItem { [weak textView] in
+			// build 後の初回起動などでは、末尾行が LazyVStack から実体化した直後の
+			// `becomeFirstResponder()` が UIKit 側のウインドウアタッチ完了前に呼ばれて失敗することがある
+			// （失敗してもログも出ず、キーボードが永久に開かないまま停止して見える）。
+			// 失敗が続く間は段階的に遅延を伸ばして複数回再試行する。
+			let retryDelaysMs: [Int] = [0, 40, 120, 260, 520, 900]
+			scheduleBecomeFirstResponderRetries(textView: textView, delaysMs: retryDelaysMs, attemptIndex: 0)
+		}
+
+		private func scheduleBecomeFirstResponderRetries(textView: UITextView, delaysMs: [Int], attemptIndex: Int) {
+			guard attemptIndex < delaysMs.count else { return }
+			let delay = delaysMs[attemptIndex]
+			let item = DispatchWorkItem { [weak self, weak textView] in
+				guard let self else { return }
 				guard let tv = textView else { return }
-				if !tv.isFirstResponder {
-					tv.becomeFirstResponder()
+				// フォーカス要求が取り下げられた（他行へ移ったなど）ら以降のリトライも止める。
+				guard self.parent.isFocused, self.lastSyncedIsFocused == true else { return }
+				if tv.isFirstResponder { return }
+				// ウインドウ未アタッチ時の `becomeFirstResponder()` は失敗扱いにして、次の遅延で再試行する。
+				if tv.window == nil {
+					self.scheduleBecomeFirstResponderRetries(textView: tv, delaysMs: delaysMs, attemptIndex: attemptIndex + 1)
+					return
+				}
+				let became = tv.becomeFirstResponder()
+				if !became || !tv.isFirstResponder {
+					self.scheduleBecomeFirstResponderRetries(textView: tv, delaysMs: delaysMs, attemptIndex: attemptIndex + 1)
 				}
 			}
 			responderApplyWorkItem = item
-			DispatchQueue.main.async(execute: item)
+			if delay <= 0 {
+				DispatchQueue.main.async(execute: item)
+			} else {
+				DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(delay), execute: item)
+			}
 		}
 
 		init(_ parent: MemoLineTextView) {
@@ -702,6 +907,9 @@ struct MemoLineTextView: UIViewRepresentable {
 		}
 
 		func textViewDidChange(_ textView: UITextView) {
+			let state = MemoSignpost.signposter.beginInterval("textViewDidChange")
+			defer { MemoSignpost.signposter.endInterval("textViewDidChange", state) }
+
 			let caret = textView.selectedRange.location
 			parent.onAttributedEdit(textView.attributedText, caret)
 			textView.invalidateIntrinsicContentSize()
