@@ -193,6 +193,7 @@ struct MemoDocumentTextView: UIViewRepresentable {
         tv.inputAccessoryView = accessory
         context.coordinator.accessory = accessory
 
+        context.coordinator.startObservingKeyboard(for: tv)
         onTextViewReady?(tv)
 
         // Scroll to end after layout settles
@@ -291,8 +292,61 @@ struct MemoDocumentTextView: UIViewRepresentable {
         var lastHighlightSourceLength: Int = -1
         var lastScrollToRange: NSRange?
 
+        private weak var managedTextView: MemoDocumentWrappingTextView?
+        private var keyboardObservers: [NSObjectProtocol] = []
+
         init(_ parent: MemoDocumentTextView) {
             self.parent = parent
+        }
+
+        deinit {
+            keyboardObservers.forEach { NotificationCenter.default.removeObserver($0) }
+        }
+
+        func startObservingKeyboard(for textView: MemoDocumentWrappingTextView) {
+            managedTextView = textView
+            guard keyboardObservers.isEmpty else { return }
+            let center = NotificationCenter.default
+            keyboardObservers = [
+                center.addObserver(forName: UIResponder.keyboardWillChangeFrameNotification, object: nil, queue: .main) { [weak self] note in
+                    self?.handleKeyboardWillChangeFrame(note)
+                },
+                center.addObserver(forName: UIResponder.keyboardWillHideNotification, object: nil, queue: .main) { [weak self] note in
+                    self?.handleKeyboardWillHide(note)
+                }
+            ]
+        }
+
+        private func handleKeyboardWillChangeFrame(_ note: Notification) {
+            guard let tv = managedTextView,
+                  let endFrame = note.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? CGRect
+            else { return }
+            let tvFrameInWindow = tv.convert(tv.bounds, to: nil)
+            let overlap = max(0, tvFrameInWindow.maxY - endFrame.minY)
+            animateInsets(tv, bottom: overlap, note: note)
+        }
+
+        private func handleKeyboardWillHide(_ note: Notification) {
+            guard let tv = managedTextView else { return }
+            animateInsets(tv, bottom: 0, note: note)
+        }
+
+        private func animateInsets(_ tv: UITextView, bottom: CGFloat, note: Notification) {
+            let duration = note.userInfo?[UIResponder.keyboardAnimationDurationUserInfoKey] as? Double ?? 0.25
+            let curveRaw = (note.userInfo?[UIResponder.keyboardAnimationCurveUserInfoKey] as? UInt ?? 0) << 16
+            UIView.animate(
+                withDuration: duration,
+                delay: 0,
+                options: UIView.AnimationOptions(rawValue: curveRaw).union(.beginFromCurrentState)
+            ) {
+                tv.contentInset.bottom = bottom
+                tv.verticalScrollIndicatorInsets.bottom = bottom
+            } completion: { _ in
+                // Scroll cursor into the now-visible area above the keyboard
+                if bottom > 0 {
+                    tv.scrollRangeToVisible(tv.selectedRange)
+                }
+            }
         }
 
         func textViewDidChange(_ textView: UITextView) {
@@ -301,6 +355,8 @@ struct MemoDocumentTextView: UIViewRepresentable {
                 textView.undoManager?.canUndo ?? false,
                 textView.undoManager?.canRedo ?? false
             )
+            // Keep cursor visible as content grows
+            textView.scrollRangeToVisible(textView.selectedRange)
         }
 
         func textViewDidEndEditing(_ textView: UITextView) {
