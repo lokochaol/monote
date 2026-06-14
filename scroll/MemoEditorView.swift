@@ -50,7 +50,6 @@ struct MemoEditorView: View {
                     MemoDocInitialBootLoadingOverlay()
                         .transition(.opacity)
                         .zIndex(2)
-                        .allowsHitTesting(true)
                 }
             }
             .safeAreaInset(edge: .bottom, spacing: 0) {
@@ -284,27 +283,12 @@ private struct MemoDocSearchHitRow: View {
 // MARK: - Boot loading overlay
 
 private struct MemoDocInitialBootLoadingOverlay: View {
-    private let dotCount = 5
-    private let dotSize: CGFloat = 11
-    private let dotSpacing: CGFloat = 14
-    private let bounceHeight: CGFloat = 13
-
     var body: some View {
         ZStack {
-            Color.white.ignoresSafeArea()
-            TimelineView(.animation(minimumInterval: 1.0 / 60.0, paused: false)) { timeline in
-                let t = timeline.date.timeIntervalSinceReferenceDate * 4.8
-                HStack(spacing: dotSpacing) {
-                    ForEach(0 ..< dotCount, id: \.self) { i in
-                        let phase = t + Double(i) * 0.62
-                        let bounce = pow(max(0, sin(phase)), 2.0)
-                        Circle()
-                            .fill(Color.black.opacity(0.9))
-                            .frame(width: dotSize, height: dotSize)
-                            .offset(y: -CGFloat(bounce) * bounceHeight)
-                    }
-                }
-            }
+            Color(UIColor.systemBackground).ignoresSafeArea()
+            ProgressView()
+                .progressViewStyle(.circular)
+                .tint(.secondary)
         }
         .accessibilityLabel(Text("Loading"))
     }

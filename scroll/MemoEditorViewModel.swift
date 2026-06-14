@@ -67,23 +67,30 @@ final class MemoEditorViewModel {
         iCloudStatus = persistence.isUsingICloudRoot ? .synced : .disabled
         await refreshICloudTransferState()
 
-        if persistence.documentExists(), let loaded = persistence.load() {
-            loadDocument(loaded)
+        if persistence.documentExists(), let loaded = await persistence.loadAsync() {
+            await loadDocument(loaded)
         } else {
             let migrated = await migrateFromBlocks()
-            loadDocument(migrated)
+            await loadDocument(migrated)
             await persistence.saveAsync(migrated)
         }
         isBootstrapped = true
     }
 
-    private func loadDocument(_ doc: MemoDocumentContent) {
+    private func loadDocument(_ doc: MemoDocumentContent) async {
         content = doc
-        let attr = MemoRichTextEncoding.attributedString(
-            rtfData: doc.rtfData,
-            archiveData: doc.archiveData,
-            plainFallback: doc.plainText
-        )
+        let rtf = doc.rtfData
+        let archive = doc.archiveData
+        let plain = doc.plainText
+        // Decode attributed string off the main thread; NSKeyedUnarchiver + image thumbnailing
+        // can take seconds on large memos with attachments, triggering a watchdog kill.
+        let attr: NSAttributedString = await withCheckedContinuation { cont in
+            DispatchQueue.global(qos: .userInitiated).async {
+                cont.resume(returning: MemoRichTextEncoding.attributedString(
+                    rtfData: rtf, archiveData: archive, plainFallback: plain
+                ))
+            }
+        }
         attributedContent = attr
         contentVersion += 1
     }
@@ -103,34 +110,40 @@ final class MemoEditorViewModel {
             linesPerBlock: lpb,
             totalLines: total
         )
+        guard !lines.isEmpty else { return MemoDocumentContent() }
 
-        let joined = NSMutableAttributedString()
-        for (i, line) in lines.enumerated() {
-            let attr = line.attributedContent()
-            if i > 0 {
-                joined.append(NSAttributedString(string: "\n", attributes: MemoRichTextEncoding.defaultTypingAttributes()))
+        // Decode + join + encode entirely off the main thread.
+        // MemoLine is Sendable; NSAttributedString lives only inside this task.
+        return await Task.detached(priority: .utility) {
+            let separator = NSAttributedString(
+                string: "\n",
+                attributes: MemoRichTextEncoding.defaultTypingAttributes()
+            )
+            let joined = NSMutableAttributedString()
+            for (i, line) in lines.enumerated() {
+                if i > 0 { joined.append(separator) }
+                joined.append(MemoRichTextEncoding.attributedString(
+                    rtfData: line.richTextRTF,
+                    archiveData: line.richTextArchive,
+                    plainFallback: line.text
+                ))
             }
-            joined.append(attr)
-        }
-        // Trim trailing newlines
-        let ns = joined.string as NSString
-        var end = ns.length
-        while end > 0 {
-            let c = ns.character(at: end - 1)
-            if c == 10 || c == 13 { end -= 1 } else { break }
-        }
-        let trimmed: NSAttributedString = end > 0
-            ? joined.attributedSubstring(from: NSRange(location: 0, length: end))
-            : NSAttributedString()
-
-        // Encode RTF/archive synchronously — nonisolated, safe on any executor
-        let (rtf, archive) = MemoRichTextEncoding.persistPayload(from: trimmed)
-
-        var doc = MemoDocumentContent()
-        doc.plainText = trimmed.string
-        doc.rtfData = rtf
-        doc.archiveData = archive
-        return doc
+            let ns = joined.string as NSString
+            var end = ns.length
+            while end > 0 {
+                let c = ns.character(at: end - 1)
+                if c == 10 || c == 13 { end -= 1 } else { break }
+            }
+            let trimmed: NSAttributedString = end > 0
+                ? joined.attributedSubstring(from: NSRange(location: 0, length: end))
+                : NSAttributedString()
+            let (rtf, archive) = MemoRichTextEncoding.persistPayload(from: trimmed)
+            var doc = MemoDocumentContent()
+            doc.plainText = trimmed.string
+            doc.rtfData = rtf
+            doc.archiveData = archive
+            return doc
+        }.value
     }
 
     // MARK: - Content updates
