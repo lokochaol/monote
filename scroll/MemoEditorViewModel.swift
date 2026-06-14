@@ -72,7 +72,7 @@ final class MemoEditorViewModel {
         } else {
             let migrated = await migrateFromBlocks()
             loadDocument(migrated)
-            persistence.save(migrated)
+            await persistence.saveAsync(migrated)
         }
         isBootstrapped = true
     }
@@ -96,7 +96,13 @@ final class MemoEditorViewModel {
         let (savedLPB, total) = bp.loadIndex()
         let lpb = savedLPB > 0 ? savedLPB : MemoBlockConfig.minLinesPerBlock
         guard total > 0, lpb > 0 else { return MemoDocumentContent() }
-        let lines = bp.loadAllLines(linesPerBlock: lpb, totalFromIndex: total)
+
+        // Load all block files off the main thread to avoid watchdog kills on large memos
+        let lines = await bp.loadLinesFromGlobalIndexToEndAsync(
+            startGlobalIndex: 0,
+            linesPerBlock: lpb,
+            totalLines: total
+        )
 
         let joined = NSMutableAttributedString()
         for (i, line) in lines.enumerated() {
@@ -117,9 +123,8 @@ final class MemoEditorViewModel {
             ? joined.attributedSubstring(from: NSRange(location: 0, length: end))
             : NSAttributedString()
 
-        let (rtf, archive) = await Task.detached(priority: .utility) {
-            MemoRichTextEncoding.persistPayload(from: trimmed)
-        }.value
+        // Encode RTF/archive synchronously — nonisolated, safe on any executor
+        let (rtf, archive) = MemoRichTextEncoding.persistPayload(from: trimmed)
 
         var doc = MemoDocumentContent()
         doc.plainText = trimmed.string
