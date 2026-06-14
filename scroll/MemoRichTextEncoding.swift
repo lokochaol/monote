@@ -6,7 +6,7 @@
 import UIKit
 
 enum MemoRichTextEncoding {
-	static func defaultTypingAttributes() -> [NSAttributedString.Key: Any] {
+	nonisolated static func defaultTypingAttributes() -> [NSAttributedString.Key: Any] {
 		let font = UIFont.preferredFont(forTextStyle: .body)
 		let paragraph = NSMutableParagraphStyle()
 		paragraph.lineBreakMode = .byCharWrapping
@@ -18,7 +18,7 @@ enum MemoRichTextEncoding {
 	}
 
 	/// 復元はアーカイブ優先（画像付きの再現性）、次に RTF、最後にプレーン。
-	static func attributedString(rtfData: Data?, archiveData: Data?, plainFallback: String) -> NSAttributedString {
+	nonisolated static func attributedString(rtfData: Data?, archiveData: Data?, plainFallback: String) -> NSAttributedString {
 		if let data = archiveData, !data.isEmpty,
 		   let decoded = try? NSKeyedUnarchiver.unarchivedObject(ofClass: NSAttributedString.self, from: data),
 		   decoded.length > 0 {

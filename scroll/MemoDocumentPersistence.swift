@@ -73,6 +73,14 @@ final class MemoDocumentPersistence {
         return try? JSONDecoder().decode(MemoDocumentContent.self, from: data)
     }
 
+    func loadAsync() async -> MemoDocumentContent? {
+        let url = documentURL
+        return await Task.detached(priority: .userInitiated) { () -> MemoDocumentContent? in
+            guard let data = try? Data(contentsOf: url) else { return nil }
+            return try? JSONDecoder().decode(MemoDocumentContent.self, from: data)
+        }.value
+    }
+
     func save(_ content: MemoDocumentContent) {
         guard let data = try? JSONEncoder().encode(content) else { return }
         try? data.write(to: documentURL, options: .atomic)
