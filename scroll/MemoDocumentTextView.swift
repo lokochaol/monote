@@ -323,30 +323,17 @@ struct MemoDocumentTextView: UIViewRepresentable {
             else { return }
             let tvFrameInWindow = tv.convert(tv.bounds, to: nil)
             let overlap = max(0, tvFrameInWindow.maxY - endFrame.minY)
-            animateInsets(tv, bottom: overlap, note: note)
+            tv.contentInset.bottom = overlap
+            tv.verticalScrollIndicatorInsets.bottom = overlap
+            if overlap > 0 {
+                tv.scrollRangeToVisible(tv.selectedRange)
+            }
         }
 
         private func handleKeyboardWillHide(_ note: Notification) {
             guard let tv = managedTextView else { return }
-            animateInsets(tv, bottom: 0, note: note)
-        }
-
-        private func animateInsets(_ tv: UITextView, bottom: CGFloat, note: Notification) {
-            let duration = note.userInfo?[UIResponder.keyboardAnimationDurationUserInfoKey] as? Double ?? 0.25
-            let curveRaw = (note.userInfo?[UIResponder.keyboardAnimationCurveUserInfoKey] as? UInt ?? 0) << 16
-            UIView.animate(
-                withDuration: duration,
-                delay: 0,
-                options: UIView.AnimationOptions(rawValue: curveRaw).union(.beginFromCurrentState)
-            ) {
-                tv.contentInset.bottom = bottom
-                tv.verticalScrollIndicatorInsets.bottom = bottom
-            } completion: { _ in
-                // Scroll cursor into the now-visible area above the keyboard
-                if bottom > 0 {
-                    tv.scrollRangeToVisible(tv.selectedRange)
-                }
-            }
+            tv.contentInset.bottom = 0
+            tv.verticalScrollIndicatorInsets.bottom = 0
         }
 
         func textViewDidChange(_ textView: UITextView) {
@@ -355,8 +342,6 @@ struct MemoDocumentTextView: UIViewRepresentable {
                 textView.undoManager?.canUndo ?? false,
                 textView.undoManager?.canRedo ?? false
             )
-            // Keep cursor visible as content grows
-            textView.scrollRangeToVisible(textView.selectedRange)
         }
 
         func textViewDidEndEditing(_ textView: UITextView) {
