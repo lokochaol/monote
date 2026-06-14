@@ -68,29 +68,26 @@ final class MemoEditorViewModel {
         await refreshICloudTransferState()
 
         if persistence.documentExists(), let loaded = await persistence.loadAsync() {
-            await loadDocument(loaded)
+            loadDocument(loaded)
         } else {
             let migrated = await migrateFromBlocks()
-            await loadDocument(migrated)
+            loadDocument(migrated)
             await persistence.saveAsync(migrated)
         }
         isBootstrapped = true
     }
 
-    private func loadDocument(_ doc: MemoDocumentContent) async {
+    private func loadDocument(_ doc: MemoDocumentContent) {
         content = doc
-        let rtf = doc.rtfData
-        let archive = doc.archiveData
-        let plain = doc.plainText
-        // Decode attributed string off the main thread; NSKeyedUnarchiver + image thumbnailing
-        // can take seconds on large memos with attachments, triggering a watchdog kill.
-        let attr: NSAttributedString = await withCheckedContinuation { cont in
-            DispatchQueue.global(qos: .userInitiated).async {
-                cont.resume(returning: MemoRichTextEncoding.attributedString(
-                    rtfData: rtf, archiveData: archive, plainFallback: plain
-                ))
-            }
-        }
+        // Decode on the main actor: the document may contain attachments
+        // (MemoSVGAttachment / MemoPreviewImageAttachment / MemoLinkChipAttachment),
+        // which are MainActor-isolated under SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor.
+        // NSKeyedUnarchiver instantiates them via init?(coder:), so this must run on main.
+        let attr = MemoRichTextEncoding.attributedString(
+            rtfData: doc.rtfData,
+            archiveData: doc.archiveData,
+            plainFallback: doc.plainText
+        )
         attributedContent = attr
         contentVersion += 1
     }
@@ -104,7 +101,8 @@ final class MemoEditorViewModel {
         let lpb = savedLPB > 0 ? savedLPB : MemoBlockConfig.minLinesPerBlock
         guard total > 0, lpb > 0 else { return MemoDocumentContent() }
 
-        // Load all block files off the main thread to avoid watchdog kills on large memos
+        // File I/O (read + JSON decode of MemoLine structs) runs off the main thread.
+        // MemoLine holds only Data, so no attachment objects are instantiated here.
         let lines = await bp.loadLinesFromGlobalIndexToEndAsync(
             startGlobalIndex: 0,
             linesPerBlock: lpb,
@@ -112,38 +110,35 @@ final class MemoEditorViewModel {
         )
         guard !lines.isEmpty else { return MemoDocumentContent() }
 
-        // Decode + join + encode entirely off the main thread.
-        // MemoLine is Sendable; NSAttributedString lives only inside this task.
-        return await Task.detached(priority: .utility) {
-            let separator = NSAttributedString(
-                string: "\n",
-                attributes: MemoRichTextEncoding.defaultTypingAttributes()
-            )
-            let joined = NSMutableAttributedString()
-            for (i, line) in lines.enumerated() {
-                if i > 0 { joined.append(separator) }
-                joined.append(MemoRichTextEncoding.attributedString(
-                    rtfData: line.richTextRTF,
-                    archiveData: line.richTextArchive,
-                    plainFallback: line.text
-                ))
-            }
-            let ns = joined.string as NSString
-            var end = ns.length
-            while end > 0 {
-                let c = ns.character(at: end - 1)
-                if c == 10 || c == 13 { end -= 1 } else { break }
-            }
-            let trimmed: NSAttributedString = end > 0
-                ? joined.attributedSubstring(from: NSRange(location: 0, length: end))
-                : NSAttributedString()
-            let (rtf, archive) = MemoRichTextEncoding.persistPayload(from: trimmed)
-            var doc = MemoDocumentContent()
-            doc.plainText = trimmed.string
-            doc.rtfData = rtf
-            doc.archiveData = archive
-            return doc
-        }.value
+        // Decode/join/encode the attributed string on the main actor.
+        // attributedContent()/persistPayload instantiate and archive the MainActor-isolated
+        // attachment classes via NSCoding; doing this off the main thread trips Swift's
+        // actor-executor assertion and crashes. The user's data is modest, so main-thread
+        // decoding here is well within the watchdog budget.
+        let separator = NSAttributedString(
+            string: "\n",
+            attributes: MemoRichTextEncoding.defaultTypingAttributes()
+        )
+        let joined = NSMutableAttributedString()
+        for (i, line) in lines.enumerated() {
+            if i > 0 { joined.append(separator) }
+            joined.append(line.attributedContent())
+        }
+        let ns = joined.string as NSString
+        var end = ns.length
+        while end > 0 {
+            let c = ns.character(at: end - 1)
+            if c == 10 || c == 13 { end -= 1 } else { break }
+        }
+        let trimmed: NSAttributedString = end > 0
+            ? joined.attributedSubstring(from: NSRange(location: 0, length: end))
+            : NSAttributedString()
+        let (rtf, archive) = MemoRichTextEncoding.persistPayload(from: trimmed)
+        var doc = MemoDocumentContent()
+        doc.plainText = trimmed.string
+        doc.rtfData = rtf
+        doc.archiveData = archive
+        return doc
     }
 
     // MARK: - Content updates
@@ -180,9 +175,11 @@ final class MemoEditorViewModel {
     private func flushToDisk() async {
         guard let pending = pendingAttributed else { return }
         pendingAttributed = nil
-        let (rtf, archive) = await Task.detached(priority: .utility) {
-            MemoRichTextEncoding.persistPayload(from: pending)
-        }.value
+        // Encode on the main actor: persistPayload archives the attributed string, which
+        // calls each attachment's encode(with:). Those attachment classes are MainActor-isolated
+        // (SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor), so archiving off the main thread crashes.
+        // Only the resulting Data is written to disk asynchronously.
+        let (rtf, archive) = MemoRichTextEncoding.persistPayload(from: pending)
         content.rtfData = rtf
         content.archiveData = archive
         await persistence.saveAsync(content)
