@@ -1234,13 +1234,19 @@ final class MemoRichTextKeyboardAccessoryView: UIView, PHPickerViewControllerDel
 	}
 
 	@objc private func bulletListTapped() {
-		guard let wrap = textView as? MemoWrappingTextView else { return }
-		wrap.insertWithTypingAttributes("- ")
+		if let wrap = textView as? MemoWrappingTextView {
+			wrap.insertWithTypingAttributes("- ")
+		} else if let wrap = textView as? MemoDocumentWrappingTextView {
+			wrap.insertWithTypingAttributes("- ")
+		}
 	}
 
 	@objc private func tabInsertTapped() {
-		guard let wrap = textView as? MemoWrappingTextView else { return }
-		wrap.insertWithTypingAttributes("\t")
+		if let wrap = textView as? MemoWrappingTextView {
+			wrap.insertWithTypingAttributes("\t")
+		} else if let wrap = textView as? MemoDocumentWrappingTextView {
+			wrap.insertWithTypingAttributes("\t")
+		}
 	}
 
 	@objc private func timestampInsertTapped() {
@@ -1248,13 +1254,17 @@ final class MemoRichTextKeyboardAccessoryView: UIView, PHPickerViewControllerDel
 			skipNextTimestampTouchUp = false
 			return
 		}
-		guard let wrap = textView as? MemoWrappingTextView else { return }
 		if !MemoTimestampSettings.onboardingComplete {
 			presentTimestampFormatPicker()
 			return
 		}
 		let s = MemoTimestampSettings.formattedNow()
-		wrap.insertWithTypingAttributes(s + " ", uniformBold: MemoTimestampSettings.timestampUseBold)
+		let bold = MemoTimestampSettings.timestampUseBold
+		if let wrap = textView as? MemoWrappingTextView {
+			wrap.insertWithTypingAttributes(s + " ", uniformBold: bold)
+		} else if let wrap = textView as? MemoDocumentWrappingTextView {
+			wrap.insertWithTypingAttributes(s + " ", uniformBold: bold)
+		}
 	}
 
 	@objc private func timestampLongPressed(_ gr: UILongPressGestureRecognizer) {
