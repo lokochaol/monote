@@ -20,7 +20,6 @@ struct MemoDocSearchHit: Identifiable {
 final class MemoEditorViewModel {
     private let persistence = MemoDocumentPersistence()
     private var saveTask: Task<Void, Never>?
-    @ObservationIgnored private var ubiquityIdentityObserver: NSObjectProtocol?
 
     // Document
     @ObservationIgnored private var pendingAttributed: NSAttributedString?
@@ -36,22 +35,12 @@ final class MemoEditorViewModel {
     var scrollToRange: NSRange?
     @ObservationIgnored private var searchDebounceTask: Task<Void, Never>?
 
-    // iCloud
-    private(set) var iCloudStatus: MemoICloudStatus = .unknown
-    private(set) var iCloudTransferActive: Bool = false
-
     // Undo/redo state (tracked from UITextView)
     var canUndo: Bool = false
     var canRedo: Bool = false
 
     // Boot state
     private(set) var isBootstrapped: Bool = false
-
-    deinit {
-        if let token = ubiquityIdentityObserver {
-            NotificationCenter.default.removeObserver(token)
-        }
-    }
 
     func attachSyncCoordinator(_ coordinator: (any MemoSyncCoordinating)?) {
         // No-op: new document model doesn't use block-based sync coordinator
@@ -60,13 +49,6 @@ final class MemoEditorViewModel {
     // MARK: - Bootstrap
 
     func bootstrap() async {
-        startObservingICloudIdentityIfNeeded()
-        await Self.runWithTimeout(milliseconds: 500) { [persistence] in
-            await persistence.prepareStorageRootIfNeeded()
-        }
-        iCloudStatus = persistence.isUsingICloudRoot ? .synced : .disabled
-        await refreshICloudTransferState()
-
         if persistence.documentExists(), let loaded = await persistence.loadAsync() {
             await loadDocument(loaded)
         } else {
@@ -97,9 +79,6 @@ final class MemoEditorViewModel {
 
     private func migrateFromBlocks() async -> MemoDocumentContent {
         let bp = MemoBlockPersistence()
-        await Self.runWithTimeout(milliseconds: 500) {
-            await bp.prepareStorageRootIfNeeded()
-        }
         let (savedLPB, total) = bp.loadIndex()
         let lpb = savedLPB > 0 ? savedLPB : MemoBlockConfig.minLinesPerBlock
         guard total > 0, lpb > 0 else { return MemoDocumentContent() }
@@ -241,69 +220,5 @@ final class MemoEditorViewModel {
 
     func clearSearchSelectionHighlight() {
         searchHighlightKeyword = nil
-    }
-
-    // MARK: - iCloud
-
-    private func startObservingICloudIdentityIfNeeded() {
-        guard ubiquityIdentityObserver == nil else { return }
-        ubiquityIdentityObserver = NotificationCenter.default.addObserver(
-            forName: .NSUbiquityIdentityDidChange,
-            object: nil,
-            queue: .main
-        ) { [weak self] _ in
-            Task { @MainActor [weak self] in
-                await self?.refreshICloudStatus()
-            }
-        }
-    }
-
-    func refreshICloudStatus() async {
-        let canResolve = await Task.detached(priority: .utility) { () -> Bool in
-            MemoStorageRoot.resolveICloudMemoBlocksURLBlocking() != nil
-        }.value
-        iCloudStatus = canResolve && persistence.isUsingICloudRoot ? .synced : .disabled
-        await refreshICloudTransferState()
-    }
-
-    func refreshICloudTransferState() async {
-        guard persistence.isUsingICloudRoot else {
-            iCloudTransferActive = false
-            return
-        }
-        let root = persistence.rootURL
-        let active = await Task.detached(priority: .utility) {
-            MemoStorageInspector.memoDataHasActiveUbiquitousTransfer(rootURL: root)
-        }.value
-        iCloudTransferActive = active
-    }
-
-    @discardableResult
-    func toggleICloudSync(enabled: Bool) async -> Bool {
-        iCloudStatus = .unknown
-        await saveTask?.value
-        let nowICloud = await persistence.setICloudEnabled(enabled)
-        iCloudStatus = nowICloud ? .synced : .disabled
-        await refreshICloudTransferState()
-        return nowICloud
-    }
-
-    func fetchStorageDiagnostics() async -> MemoStorageDiagnostics {
-        await persistence.fetchStorageDiagnostics()
-    }
-
-    func evictUnusedICloudItems() async -> Int {
-        await persistence.evictUnusedICloudItems()
-    }
-
-    // MARK: - Helpers
-
-    private static func runWithTimeout(milliseconds: UInt64, _ work: @MainActor @escaping () async -> Void) async {
-        await withTaskGroup(of: Void.self) { group in
-            group.addTask { @MainActor in await work() }
-            group.addTask { try? await Task.sleep(nanoseconds: milliseconds * 1_000_000) }
-            _ = await group.next()
-            group.cancelAll()
-        }
     }
 }

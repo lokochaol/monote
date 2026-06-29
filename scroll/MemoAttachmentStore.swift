@@ -13,8 +13,7 @@ import Foundation
 /// - 同じ SVG / 画像をどこに何度貼ってもファイル 1 つにまとまる（dedup）。
 /// - アーカイブには参照（ハッシュ + 拡張子）だけが乗るので 1 行あたりの
 ///   `richTextArchive` が劇的に縮み、`MemoLine` を持ち回るときの RAM / COW コストが減る。
-/// - `MemoBlockPersistence` の `rootURL` と同じ `memo_blocks/` 配下に置くため、
-///   将来 iCloud Drive (Ubiquity Container) へ移行する際もそのまま付いてくる。
+/// - `MemoBlockPersistence` の `rootURL` と同じ `memo_blocks/` 配下に置く。
 ///
 /// このストアは `NSCoding` の経路（バックグラウンドの persistence flush 等）から
 /// 同期で叩かれるため、すべての API は `nonisolated` かつスレッドセーフな範囲に閉じる。

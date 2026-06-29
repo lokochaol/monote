@@ -75,23 +75,6 @@ struct MemoEditorView: View {
                         .accessibilityLabel(Text("Redo"))
                     }
                 }
-                ToolbarItem(placement: .principal) {
-                    if model.isBootstrapped {
-                        MemoICloudStatusButton(
-                            status: model.iCloudStatus,
-                            isTransferring: model.iCloudTransferActive,
-                            onToggle: { newValue in
-                                await model.toggleICloudSync(enabled: newValue)
-                            },
-                            onFetchDiagnostics: {
-                                await model.fetchStorageDiagnostics()
-                            },
-                            onEvictUnused: {
-                                await model.evictUnusedICloudItems()
-                            }
-                        )
-                    }
-                }
             }
             .toolbarBackground(.hidden, for: .navigationBar)
             .toolbarBackground(.hidden, for: .automatic)
@@ -111,10 +94,6 @@ struct MemoEditorView: View {
             }
             .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillHideNotification)) { _ in
                 keyboardTopScreenY = nil
-            }
-            .onReceive(Timer.publish(every: 2.5, tolerance: 0.5, on: .main, in: .common).autoconnect()) { _ in
-                guard model.isBootstrapped, model.iCloudStatus == .synced else { return }
-                Task { await model.refreshICloudTransferState() }
             }
             .sheet(isPresented: $showSearch) {
                 MemoDocKeywordSearchSheet(model: model, isPresented: $showSearch)
