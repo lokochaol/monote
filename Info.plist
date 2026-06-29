@@ -4,17 +4,5 @@
 <dict>
 	<key>CFBundleIconName</key>
 	<string>AppIcon</string>
-	<key>NSUbiquitousContainers</key>
-	<dict>
-		<key>iCloud.khirooka.scroll</key>
-		<dict>
-			<key>NSUbiquitousContainerIsDocumentScopePublic</key>
-			<true/>
-			<key>NSUbiquitousContainerName</key>
-			<string>Monote</string>
-			<key>NSUbiquitousContainerSupportedFolderLevels</key>
-			<string>Any</string>
-		</dict>
-	</dict>
 </dict>
 </plist>

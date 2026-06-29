@@ -236,22 +236,54 @@ enum MemoImageInsertion {
 		}
 	}
 
-	/// `UIImage` をオリジナル品質に近い `Data` にエンコードし、対応する UTI を返す。
+	/// 保存する画像実体の長辺ピクセル上限。メモ用途では原寸（数 MB）は過剰なので、
+	/// 表示・フルスクリーン閲覧に十分なこの解像度まで落としてから永続化する。
+	private static let storedImageMaxLongEdge: CGFloat = 2048
+	/// 非透過画像を保存する際の JPEG 品質。0.92 から落としても体感差はほぼ無く、容量だけ大きく減る。
+	private static let storedImageJPEGQuality: CGFloat = 0.78
+
+	/// `UIImage` をメモ品質（長辺上限 + 再圧縮）の `Data` にエンコードし、対応する UTI を返す。
+	/// 原寸のまま `attachment.contents` に抱えると 1 枚で数 MB になり保存容量を圧迫するため、
+	/// `storedImageMaxLongEdge` を超えるものはダウンサンプルし、非透過は JPEG で再圧縮する。
 	/// アルファチャネルを持つ画像のみ PNG、それ以外は JPEG。
 	private static func encodedOriginalData(from image: UIImage) -> (data: Data?, uti: String) {
-		let hasAlpha: Bool = {
-			guard let cg = image.cgImage else { return true }
-			switch cg.alphaInfo {
-			case .none, .noneSkipLast, .noneSkipFirst:
-				return false
-			default:
-				return true
-			}
-		}()
+		// 縮小レンダリングはアルファを足してしまうため、判定は必ず元画像で行う。
+		let hasAlpha = imageHasAlpha(image)
+		let downsized = downsizedForStorage(image, opaque: !hasAlpha)
 		if hasAlpha {
-			return (image.pngData(), UTType.png.identifier)
+			return (downsized.pngData(), UTType.png.identifier)
 		}
-		return (image.jpegData(compressionQuality: 0.92), UTType.jpeg.identifier)
+		return (downsized.jpegData(compressionQuality: storedImageJPEGQuality), UTType.jpeg.identifier)
+	}
+
+	/// 画像がアルファチャネル（透過）を持つか。`cgImage` を取れないときは安全側に倒して `true`。
+	private static func imageHasAlpha(_ image: UIImage) -> Bool {
+		guard let cg = image.cgImage else { return true }
+		switch cg.alphaInfo {
+		case .none, .noneSkipLast, .noneSkipFirst:
+			return false
+		default:
+			return true
+		}
+	}
+
+	/// 長辺が `storedImageMaxLongEdge` を超える画像だけ、アスペクト比を保って縮小する。
+	/// 上限以下はそのまま返す（再レンダリングによる劣化やアルファ付与を避ける）。
+	/// - Parameter opaque: 非透過と分かっているときは `true`。アルファチャネルを持たせず JPEG 化に備える。
+	private static func downsizedForStorage(_ image: UIImage, opaque: Bool) -> UIImage {
+		let pixelW = image.size.width * image.scale
+		let pixelH = image.size.height * image.scale
+		let longEdge = max(pixelW, pixelH)
+		guard longEdge > storedImageMaxLongEdge, longEdge > 0 else { return image }
+		let ratio = storedImageMaxLongEdge / longEdge
+		let targetSize = CGSize(width: pixelW * ratio, height: pixelH * ratio)
+		let fmt = UIGraphicsImageRendererFormat.default()
+		fmt.scale = 1
+		fmt.opaque = opaque
+		let renderer = UIGraphicsImageRenderer(size: targetSize, format: fmt)
+		return renderer.image { _ in
+			image.draw(in: CGRect(origin: .zero, size: targetSize))
+		}
 	}
 
 	static func presentFullscreen(for attachment: NSTextAttachment, from view: UIView) {
